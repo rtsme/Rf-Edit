@@ -1,0 +1,24 @@
+Editing the item used to open an NPC remotely
+Example:
+(Unity Merchant Beeper) is an item used to access MAU remotely.
+When you open this item, there are 2 buttons
+1* item trade (where you buy MAUs)
+2* tuning (where you customize the MAU)
+
+To change the content of the first button, we need to open the files
+
+Npclinkitem.dat / ndstore.dat / store.dat / item.dat
+
+ndstore is for choosing the NPC that will show up when you click the
+1* item trade button of the item
+(Unity Merchant Beeper)
+The content of the chosen NPC will show up.
+
+The store.dat file is for copying the code from the (npc_code) column.
+Copy the code from the (npc_code) column that matches the NPC you chose in the ndstore.dat file.
+
+Now open the file npclinkitem.dat.
+Paste the code you copied into the column (strStoreCode).
+
+Open the item.dat file, navigate to (pager in the menu)
+Paste the copied code into the (NPC) column matching the remote NPC item you edited.

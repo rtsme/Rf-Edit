@@ -1,0 +1,16 @@
+To remove the item selection popup when changing class.
+Example:
+
+I'm a level 30 Cora Summoner and I need to pick one of the 3 animus, right?
+
+But if I want to receive all 3 animus, I need to go to the class where you get these 3 items in the file:
+Class.dat in the server script, and set the option SelectRewardItem to False.
+
+And in the client's character.edf file, also go to the class table, column:
+Selection (0-all 1-Choice), and set it to 0.
+
+It will have the number 1, meaning it's set to true (to select an item), so change it to 0.
+
+Since we want to receive all 3 items at once without choosing, just set SelectRewardItem to false in the server's class.dat, and set the Selection (0-all 1-Choice) column to 0 in the client's character.edf class table.
+
+When changing class, the item-selection popup won't appear and you'll receive all of them.

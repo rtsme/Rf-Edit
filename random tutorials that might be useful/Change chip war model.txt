@@ -1,0 +1,39 @@
+To change the chip's model there are two ways:
+
+First way, which is what I do:
+
+Convert character.edf to .dat, located in your client's DataTable.
+Open character.dat and search in the Monster menu:
+04B00 — this is the code for Chip Bell.
+Change this code to another monster's code, save, and convert back to .edf, replacing it in DataTable.
+
+04B00 Chip Bell
+04B01 Chip Cora
+04B02 Chip Acc
+
+##############################################
+
+Second way, found on forums but not tested:
+
+In the file Server/RF_Bin/Initialize/NewHolySystem.ini
+
+You'll find this:
+
+StoneCreateMap0 = resources
+StoneCreateDummy0 = dh001
+StoneMonsterCode0 = [B]04B00[/B]
+StoneMasterRace0 = 0
+
+StoneCreateMap1 = resources
+StoneCreateDummy1 = dh002
+StoneMonsterCode1 = [B]04B01[/B]
+StoneMasterRace1 = 1
+
+StoneCreateMap2 = resources
+StoneCreateDummy2 = dh003
+StoneMonsterCode2 = [B]04B02[/B]
+StoneMasterRace2 = 2
+
+Change the StoneMonsterCode for each race to the new mob's model code and restart the server.
+
+##############################################

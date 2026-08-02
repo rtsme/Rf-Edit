@@ -1,0 +1,26 @@
+Find the correct NPC via ndstore.dat
+Go to store.dat and storelist.dat and change the $FFFFFFF found in the column (DWORD;) (ItemUpCode) to 70000000
+(slot number)(number of talismans)
+
+Do the same in storelist.dat in the column nItemUpCode.
+
+Talisman codes:
+0 = keen talisman
+2 = darkness
+5 = favor
+c = mercy
+b = grace
+1 = vampire
+3 = chaos
+
+Put the number 7, and 7 times the talisman's number, example:
+73333333 (+7 for chaos)
+
+The first digit is the number of slots
+F means an empty slot
+The final digits are the talisman number
+
+Example of a +3 item with 7 slots:
+7FFFF333.  ← talisman numbers
+↑.   ↑→ number of empty slots
+Number of slots

@@ -1,0 +1,6 @@
+In the quest.dat file, located in the server folder, you'll find the return weapons and the level 40-45 boxes.
+
+In the Class.dat file, located in the server folder, you'll find the teleport items and the potions.
+
+⚠️ If removing an item using 010 Editor:
+Set quantity to -1 and the item code to -1

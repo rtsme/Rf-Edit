@@ -1,0 +1,122 @@
+To block deletion of characters level 40+, meaning no one can delete a character that is level 40 or above, use this query.
+
+With this, only characters level 40 and below can be deleted — i.e.: 39, 38, 37, 36...
+
+
+/****************************************************************
+Anti Delete Character - RF Online
+Rule: Character level 40 or higher CANNOT be deleted.
+mukadzi#9505
+****************************************************************/
+
+USE [RF_World]
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+/* =======================
+   STEP 1 - DELETE BASE
+   ======================= */
+ALTER PROCEDURE [dbo].[pDelete_Base]
+@serial INT
+AS
+BEGIN
+    SET XACT_ABORT ON
+    SET NOCOUNT ON
+
+    BEGIN TRY
+        DECLARE @LevelReq INT
+
+        SELECT @LevelReq = Lv
+        FROM [dbo].[tbl_base]
+        WHERE Serial = @serial
+
+        BEGIN TRANSACTION
+            -- BLOCKS DELETE IF LEVEL >= 40
+            IF (@LevelReq >= 40)
+                RETURN 0
+            ELSE
+                UPDATE [dbo].[tbl_base]
+                SET DCK = 1,
+                    Arrange = 1,
+                    DeleteTime = GETDATE()
+                WHERE Serial = @serial
+        COMMIT
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0
+            ROLLBACK TRANSACTION
+    END CATCH
+END
+GO
+
+/* =======================
+   STEP 2 - SAVE NAME
+   ======================= */
+ALTER PROCEDURE [dbo].[pUpdate_DeleteName_Step1]
+@serial INT
+AS
+BEGIN
+    SET XACT_ABORT ON
+    SET NOCOUNT ON
+
+    BEGIN TRY
+        DECLARE @LevelReq INT
+
+        SELECT @LevelReq = Lv
+        FROM [dbo].[tbl_base]
+        WHERE Serial = @serial
+
+        BEGIN TRANSACTION
+            -- BLOCKS DELETE IF LEVEL >= 40
+            IF (@LevelReq >= 40)
+                RETURN 0
+            ELSE
+                UPDATE [dbo].[tbl_base]
+                SET deletename = name
+                WHERE Serial = @serial
+        COMMIT
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0
+            ROLLBACK TRANSACTION
+    END CATCH
+END
+GO
+
+/* =======================
+   STEP 3 - RENAME CHAR
+   ======================= */
+ALTER PROCEDURE [dbo].[pUpdate_DeleteName_Step2]
+@serial INT
+AS
+BEGIN
+    SET XACT_ABORT ON
+    SET NOCOUNT ON
+
+    BEGIN TRY
+        DECLARE @LevelReq INT
+
+        SELECT @LevelReq = Lv
+        FROM [dbo].[tbl_base]
+        WHERE Serial = @serial
+
+        BEGIN TRANSACTION
+            -- BLOCKS DELETE IF LEVEL >= 40
+            IF (@LevelReq >= 40)
+                RETURN 0
+            ELSE
+                UPDATE [dbo].[tbl_base]
+                SET name = '*' + CAST(Serial AS VARCHAR)
+                WHERE Serial = @serial
+        COMMIT
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0
+            ROLLBACK TRANSACTION
+    END CATCH
+END
+GO

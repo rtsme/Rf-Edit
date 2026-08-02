@@ -1,0 +1,74 @@
+Open the files using a hex editor:
+
+Cliente/chef/eff/crystal/crystalon.eff
+Cliente/chef/eff/crystal/crystalchip.eff
+
+On line 0110h
+There's this code: B5 00
+This code refers to the chip's aura.
+Converted to decimal: 181
+This 181 points to the path where you'll find the aura's spt and dds files.
+
+Search for this 181 in the file:
+
+Cliente/chef/particle.ini
+
+You'll find:
+/chef/up/cry_box/aura_00.spt
+
+This is the path to the current aura.
+But in the chef folders, we don't have that path — that's because it's inside the file:
+Cliente/chef/chefEntity1.rpk
+
+I recommend not modifying it, but instead creating a new aura.
+
+Open your file: particle.ini and check maxparticle="???" on line 2.
+
+Mine has maxparticle = 1078.
+Let's create a new line, so I changed the maxparticle number from:
+1078 to 1079.
+
+Now go to the last line of the particle.ini file.
+
+Copy your last entry and paste it below.
+
+Change [particle1078] to [particle1079]
+And the index too, to 1079.
+And below, on the particle= line
+this is the path where the new aura will be.
+Let's set it to = .\chef\war\aura_chip.spt
+
+Done, save, and your particle is ready.
+Note the number of the new entry you created — in my case it was 1079.
+
+Now create a folder called "war" in the folder:
+Cliente/chef/
+
+Inside it, grab the "war" folder that's inside the file "Patch aura chip.rar"
+
+It will come pre-configured with an aura I made.
+
+Now, for this new aura to show up in-game, we need to edit the files:
+
+Cliente/chef/eff/crystal/crystalon.eff
+Cliente/chef/eff/crystal/crystalchip.eff
+
+On line 0110h of crystalon.eff
+There's this code: B5 00
+
+Change this code:
+Open a calculator and convert to decimal:
+1079 to hex.
+In my case it comes out to 437
+
+Edit the B5 00
+to 37 04, which is 437 reversed in hex.
+
+Now in the file: crystalchip.eff
+Also on line 0110h there's the same code:
+B5 00
+Change it too, to the new code:
+37 00.
+
+This means crystalon.eff and crystalchip.eff will now point to code 37 00 in hex, which corresponds to line 1079 in particle.ini.
+And your particle.ini on line 1079 has the new aura located in the chef/war folder. Done.

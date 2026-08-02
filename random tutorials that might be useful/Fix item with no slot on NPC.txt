@@ -1,0 +1,2 @@
+If, when adding items to a new NPC, even after setting 7fffffff on the NPC in storelist, the item shows up with 0 slots in-game (forcing you to drop the item on the ground).
+Just change the NPC's Store_trade column to the number 23.

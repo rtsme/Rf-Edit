@@ -1,0 +1,28 @@
+Go to the folder rf_bin/map/sette/
+
+Copy the file setteext.spt to the folder of the map that will have the safe zone.
+
+After that, open the file, go in-game, and use the command %xyz at the location where the safe zone will be.
+
+Go back to the open file and replace the coordinates with the coordinates the game showed you.
+
+Rename the map in the script, example, it will read:
+
+script_begin
+
+*Sette_dummy01 -100 -100 -100 100 100 100
+-music
+-id 8
+-node_tm
+0.999985 0.000000 -0.005473 0.000000
+0.000000 1.000000 0.000000 0.000000
+0.005473 0.000000 0.999985 0.000000
+245 1124 -8603 1.000000
+
+script_end
+
+Rename the map, for example to HQ Bell, and it becomes:
+
+*NeutralB_dummy01 -100 -100 -100 100 100 100
+
+These numbers, 100, are the size of the safe zone.

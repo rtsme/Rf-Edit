@@ -1,0 +1,65 @@
+Open item.edf
+Navigate to the item you want to add to the cash shop.
+Find the column "IsCashItem"
+When you find the column it will have the value 0 — change it to 1.
+Save.
+
+Go in-game and see where you'll place the new item.
+Example:
+I'll put an item in the first window of the cash shop, after the item "Jade of Communication [2hr]" which costs 450 cash coins.
+
+Open the Code program and find the code for "Jade of Communication [2hr]"
+
+Once you find the code, open the parser's cash shop.txt file using Excel. The path to the txt file:
+www/parser/gu_in/CashShop.edf/
+NOTE: Do NOT open the .xlsx — open the file with the .txt extension using Excel.
+
+Search for the copied Jade code in the txt file.
+
+Find the row with the Jade's code.
+Now let's create a blank row above the Jade's row.
+
+Copy the entire Jade row and paste it into your blank row.
+
+Now edit the columns:
+Column A = the id of the new item, which goes into your SQL server in BILLING.
+
+Column B = the item's code
+
+Column C = the item's price in the in-game cash shop.
+
+NOTE: check the highest number in column A — in my case it goes up to cash551,
+meaning we have 551 items.
+
+So in my case, I'll set cash552 for the new item in column A of the new row.
+
+Save the txt.
+Open the parser in your browser and click on cashshop.php to generate the files:
+
+Cashshop.dat
+Cashshop.dat_str
+nditemcash.dat
+itemcash.dat
+
+Now open the file corresponding to the item you're adding to the cash shop, for example:
+I added a potion, so the file is:
+PotionItem.dat in the server folder.
+Open it and find the item you're adding to the cash shop, find the column "IsCash"
+And set its value to 1 as well.
+Save.
+
+Now we just need to add the item to the SQL server.
+Open your SQL Management Studio.
+Right-click on the "BILLING" table,
+click New Query — a blank window will open, now type this code to add the item.
+
+NOTE: the first ' ' is where the item code goes, so put the code of the item you're adding.
+the second ' ' is where the cash shop code goes — in my case I had 551 items, which was code cash551, but since I'm adding a new one, it will be code cash552.
+and the last ' ' is the item's price — use the same price you set in the cashshop.txt file.
+
+INSERT INTO [BILLING].[dbo].[tbl_cashList] ([id],[name],[cost]) VALUES (CONVERT(varchar(7),'ipwhp02'),CONVERT(varchar(50),'cash001'),CONVERT(nchar(10),'1100'))
+
+Now run the code in SQL.
+You can close SQL Studio.
+Now copy the edited cash shop files to your server's script folder and to the client's DataTable folders.
+Tutorial tested and created by Brendel 05-06-2021 (01:42 am) — server 2.2.3.2

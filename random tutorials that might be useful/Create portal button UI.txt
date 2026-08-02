@@ -1,0 +1,64 @@
+Open your dataTable's map.edf using 010 Editor.
+
+Find the map where you'll edit the button:
+In my case I'll edit the portal button for the Ether ship, located at HQ Bell.
+
+In the column "struct maps map[0]"
+you'll find all the portal buttons for the HQ Bell map.
+
+Opening this column, below it there's another column:
+"struct PORTAL_INFO pPortalInfo[21]"
+This column contains all the buttons,
+and note the [21] in the name — that means we have 21 maps to edit.
+
+Opening it, we find the 21 buttons.
+I'll edit:
+"struct PORTAL_INFO pPortalInfo[6]"
+
+This is the button for boarding the ship.
+
+After opening this column, scrolling down a bit we find these two menus:
+float vecMin[3]
+float vecMax[3]
+
+Opening "float vecMin[3]"
+we find:
+float vecMin[0]
+float vecMin[1]
+float vecMin[2]
+Each one has a number — this is the minimum coordinate the map will use, meaning that entering this coordinate makes the map recognize there's a button and show it on your in-game screen.
+
+float vecMin[0] is the X width
+float vecMin[1] is the Y height
+float vecMin[2] is the Z depth
+
+In the column:
+"float vecMax[3]"
+we find the same menus, but with different coordinates — this is because the map reads the maximum, up to where the map button will appear on your screen.
+
+When changing the min and max location, you must swap the position of:
+"float vecMin[3]"
+float vecMin[0]
+
+with:
+"float vecMax[3]"
+float vecMax[0]
+
+Example:
+Minimum coordinate was:
+float vecMin[0] -3406
+float vecMin[1] 296
+float vecMin[2] 6716
+
+And maximum coordinate was:
+float vecMax[0] -3464
+float vecMax[1] 307
+float vecMax[2] 6767
+
+You need to swap "float vecMin[0]" and "float vecMax[0]" — put the maximum's value into the minimum,
+and the minimum's value into the maximum. Only "float [0]".
+The others:
+float [1]
+float [2]
+
+you leave as is — minimum stays minimum, maximum stays maximum. Understand? We only swap "float [0]" between minimum and maximum, and vice versa.

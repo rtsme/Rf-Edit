@@ -1,0 +1,22 @@
+Take NDLanguage.edf and run it through edf-dat to turn it into a dat file.
+
+Take this new NDLanguage.dat file and run it through NDLanguageTool.txt and it will turn it into a text file:
+NDLanguage.txt
+
+Open the text file with Notepad and delete the message, but don't delete its index number, example:
+
+3151 item cannot....
+3152 Item routing failed....
+3153 Item failed
+
+If we want to delete the message at index 3152, we'll leave it like this:
+
+3151 item cannot....
+3152
+3153 Item failed
+
+Still with its index, but with the message deleted and replaced with a space.
+
+Now run the txt file through the tool and it will turn it into a new NDLanguage.dat, then run that through edf-dat to generate the new edf.
+
+Now, in-game, when this message would normally appear, it won't show on screen — though a blank, invisible message may still appear in chat.

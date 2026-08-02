@@ -1,0 +1,26 @@
+Open the file: .
+
+Character file inside the client, using Structorian.
+
+Go to the Monsters tab and look up the monster's id — you can use the "RF Online Codes" program to find the monster's code or id.
+
+Once found, go to the column:
+
+Level, and edit it. Example:
+
+If the mob is level 50, that means it will unlock at level 40 and up to level 60.
+
+It's always -10 levels for the "unlock at" table and +10 levels for the "no longer shows" table (name turns white).
+
+So if the table shows level 50, it means at level 40 the mob becomes available, and at level 60 it's no longer available.
+
+After editing and saving, you'll need to edit the file:
+
+MonsterCharacter.dat, located inside your server's script folder.
+
+But open it with 010 Editor.
+
+Put the same level you edited in the character file, now in the monstercharacter file.
+
+The level column is called:
+Float Level.

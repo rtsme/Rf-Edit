@@ -1,0 +1,82 @@
+Open the folder of the map where the mob is located.
+Example: let's edit Flyn.
+So we go to the folder:
+"Server/zoneserver/rf_bin/maps/neutralB/"
+Now open the file "neutralB.spt" with Notepad and minimize it.
+Go in-game and go to where the mob is.
+Now type the command "xyz"
+to see your location.
+It will show up in chat like this example:
+"map: NeutralB x: -4160, y: 393, z: 7169"
+
+Go back to Notepad, to the file you opened earlier, and search for the first 2 digits of the "x" field.
+
+Example: -41
+
+You'll see a bunch of -41 entries in Notepad; keep going to the next one until you find something close to, similar to, or identical to the location the game showed you when you typed %xyz.
+
+When you find something similar, it will look like this example:
+
+-4160.848493 393.472952 7169.948493
+
+Does that look like the location the game showed us when we typed %xyz?
+
+Minimize Notepad.
+
+Now go in-game and type
+
+%jump NeutralB -4160.848493 393.472952 7169.948493
+
+and press enter.
+If your character lands right on top of the mob you picked earlier, then that's its location.
+
+Note:
+
+The command above means:
+%jump = go to.
+NeutralB = selected map
+-4160.848493 393.472952 7169.948493 =
+the coordinates.
+
+Now go back to Notepad with the file still open — copy the name of the file where you found the correct coordinate code.
+The file name is above the coordinates and looks like this:
+
+*neutralbm04
+
+Good, now we have the name of the file where the mob we're going to change the respawn time (and mob count) for is located.
+
+You can minimize everything now and open the 010 Editor program.
+Go to Templates and select the file
+"[server]map_DMM"
+Now you need to open the file with the same name you found the mob in.
+
+Example, if it was: *neutralbm04
+This file will always be in the folder of the map you're editing — in our case, the "NeutralB" folder.
+
+Once the file is open, it will look like this in 010 Editor:
+
+int max_skill_level
+>struct HEADER header
+>struct MAPBLOCK map[1]
+
+Open the 3rd menu option:
+>struct MAPBLOCK map[1]
+
+Another menu will appear:
+>struct MAPBLOCK map[0]
+
+Open it and several menus will appear below.
+
+The column that refers to respawn time is this one:
+int respawnTime or float waittime
+Set a lower value to decrease the time.
+
+The int totalMobs column is the number of mobs that will spawn there.
+
+Note: still in 010 Editor there's also a column named:
+
+char code:
+with a code next to it.
+Open the program:
+RF Online Codes by NiteMare and search for that code in the Monsters tab.
+The monster's name corresponding to that code will show up — if it's the one you wanted to edit, just save the edited file in 010 Editor, restart the server, and log in to check.

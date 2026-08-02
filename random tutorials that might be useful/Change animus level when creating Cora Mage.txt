@@ -1,0 +1,10 @@
+The animus level given when creating a Mage character is in the server's class.dat file.
+It has the code and, next to it, a number that is the % of xp it will receive.
+
+You can use:
+isiCharacter.dat
+inannaCharacter.dat
+hecateCharacter.dat
+paymoncharacter.dat
+
+to see the % for each level and use the same number in the class.dat file.

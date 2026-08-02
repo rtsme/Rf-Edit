@@ -1,0 +1,12 @@
+To change an NPC's name, open the NDStore.edf, located in the client folder client/DataTable/en-gb/ "here"
+
+Convert the file to .dat and edit the NPC. To confirm you picked the right NPC, open the Storelist.dat file located in the server folder server/zoneserver/RF_Bin/Script/ "here".
+
+The chosen NPC, example: POTION (EL LUNA)
+is at position number 5 in the Structorian table with NDStore.
+
+So in storelist.dat in Structorian, it will also be number 5 in the table ranking.
+
+So go to the storelist table, and in the Map column of the table, you'll find the map that NPC is on — in this NPC's case, it's in NeutralB, HQ Bellato.
+
+So you can confirm that this NPC, Potion (El Luna), is located at HQ Bell.

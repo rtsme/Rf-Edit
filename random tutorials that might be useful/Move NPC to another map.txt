@@ -1,0 +1,48 @@
+Open the folder of the map you're removing the NPC from, example:
+Zoneserver/rf_bin/map/Sette/
+Open the file using Notepad++:
+Sette.spt
+
+Open two Structorian windows and open the files
+NDStore.strs and NDStore.dat
+Storelist.strs and Storelist.dat
+
+In NDStore, find the NPC by its name and find its rank/count position, example: the "potion" NPC is at id=4
+
+In StoreList, go to the same rank/count of the NPC you picked in NDStore.
+
+There will be a column named ID with a code similar to: sd03000
+
+Copy this code and go to the map file you're removing the NPC from, and search for the copied code.
+
+You'll find the code starting with *sd3000, and below it, in the next paragraph, another similar code starting with *bd3000
+
+Select from the *sd3000 code you searched for, to the last number of the *db3000 code's paragraph.
+
+The selection will be roughly 12 lines.
+
+Now go to the folder of the map that will receive the NPC, example:
+
+Zoneserver/rf_bin/map/Cora/
+
+Open the map file.
+Cora.spt
+
+Now paste the copied code
+You can paste this code after any pair of paragraphs.
+Make sure you don't split any code paragraph — you copied a pair of codes, and now you need to paste it at the end of another pair of codes.
+
+Now save this file.
+
+Go back to the storelist.dat file, there's a column named Store_MAPcode.
+Change whatever map is set there to the name of the destination map.
+
+Now save and generate store.dat
+
+Now open store.dat and check the Race_Code column — when this file is generated it may end up filled in for only one race, change it to "all race", save, and generate the edf files.
+
+Now just paste storelist.dat and store.dat into the folder: zoneserver/rf_bin/script/ here.
+
+And convert both files to edf and paste them into the client's DataTable folders.
+
+Just restart the server and you're done.

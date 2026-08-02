@@ -1,0 +1,3 @@
+Open the monstercharacter.dat file in the server's script folder.
+
+The m_fExt column is its exp rate.

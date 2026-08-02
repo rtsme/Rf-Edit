@@ -1,0 +1,58 @@
+To move an NPC's location
+- open NDstore.strs and .dat (to find the NPC's number)
+- open StoreList.strs and .dat
+(to find the NPC number matching the one in NDstore)
+
+Example:
+
+In NDStore you found the NPC "potions" and its id number is 150, so in StoreList you go to nCount 150, which matches the NPC you picked in NDstore.
+
+- Still in Storelist there's a column called
+ID:
+
+- go to the number of the NPC you picked in NDstore, e.g. 150
+- when you find nCount:150 in Storelist, there will be an ID column next to nCount, and in that ID column there will be a code
+e.g.: sd03061.
+Copy the code sdxxxxxx and save it somewhere, you'll need it.
+
+- go to the folder rf/server/zoneserver/RF_Bin/Map/
+
+Now find the map where the NPC you want to edit is located
+Example, HQ Bell: NeutralB.spt
+
+- right-click this file and open it with Notepad++
+
+- in Notepad++, press CTRL+F to find the code sdxxxxx you copied from the Storelist file
+
+- a list like this will appear, example:
+
+*sd03002    -25    -25    -25        25    25    25    -node_tm
+    1.000000 0.000000 -0.000000 0.000000
+    0.000000 1.000000 0.000000 0.000000
+    0.000000 0.000000 1.000000 0.000000
+   -4940.231934 1781.817383 982.663818 1.000000
+          ↑.                   ↑.                     ↑
+Coordinate.       Coordinate.    Coordinate
+
+You'll edit these numbers, which represent the NPC's location:
+
+- go into RF and type the command %xyz where you want to place the NPC
+- coordinates will appear, example:
+-4940 174 9825
+Now just copy and paste them into Notepad (editing the NPC's coordinate)
+
+sd03002    -25    -25    -25        25    25    25    -node_tm
+    1.000000 0.000000 -0.000000 0.000000
+    0.000000 1.000000 0.000000 0.000000
+    0.000000 0.000000 1.000000 0.000000
+   -4940.231934 174.817383 9825.663818 1.000000
+          ↑.                   ↑.                     ↑
+You can change the numbers after the decimal point to 0, example:
+
+sd03002    -25    -25    -25        25    25    25    -node_tm
+    1.000000 0.000000 -0.000000 0.000000
+    0.000000 1.000000 0.000000 0.000000
+    0.000000 0.000000 1.000000 0.000000
+   -4940.000000 174.000000 9825.000000 1.000000
+
+That's how your code will look — now save, restart the server, and it will be changed.

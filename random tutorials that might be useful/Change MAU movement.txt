@@ -1,0 +1,7 @@
+To make MAUs move using the WSAD keys, we need to search for this offset using the HxD hex editor in rf_online.bin
+
+Client:
+BSB - 0005AEE6
+GU - 00057726
+
+Change the value from 74 to EB and save.

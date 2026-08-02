@@ -1,0 +1,13 @@
+In the Entity.ini file, located in the client's Chef/ folder.
+
+Search for "chip" and remove the whole entry:
+
+[ENTITY58]
+INDEX = 58
+ABSAXIS=0
+ENTITY=.\Chef\Up\Cry_box\chip\chip.R3E
+
+You can change the flying icon by changing the image at:
+
+ChefEntity1.rpk
+\Chef\Up\Cry_box\chip\chip.r3t

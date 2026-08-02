@@ -1,0 +1,9 @@
+Go into worldinfo.ini in the folder
+server/zoneserver/
+Change
+ReleaseType = Internal to
+ReleaseType = Release
+
+Warning! Once you change this, the xp percentages that used to show in chat will disappear.
+
+But GM accounts will also no longer be able to attack the chip.

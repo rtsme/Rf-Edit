@@ -1,0 +1,57 @@
+Changing the portal's destination map.
+
+1# On the map you'll be leaving from, you need to add dpgoto_ and the map's name.
+In the portal info column pPortalInfo, still on the departure map.
+
+2# In the portalMapLinks column, set int linkMapIndex to the number of the map that will receive your character.
+And below it, set int linkPortalIndex to the number where dpfrom_(map name you came from) is located.
+This will be in the info pPortalInfo column of the destination map.
+
+Above are the edits for the departure map.
+
+On the destination map.
+
+In the info pPortalInfo column, set dpfrom_(name of the map you came from).
+
+After that, open the map files for both the departure and destination maps, example:
+neutralB_[portal].dat
+
+Located in the map's folder inside the server folder.
+
+Also open the .spt files for the departure and destination maps, example:
+NeutralB.spt
+
+In the open portal.dat file for the departure map, in 010 Editor
+we need to edit it like this:
+If neutralB goes to Ether, then in the file neutralb-[portal].dat you need to add:
+dpgoto_(name of destination map)
+
+Now in the file for the destination map, example:
+The Ether map, located in the folder "Platform01"
+Ether map file:
+"platform01_[portal].dat"
+you'll need to add another block using a hex editor, and then use 010 Editor to put the code below in the new block:
+dpfrom_(name of the map you came from)
+
+Remember:
+dpfrom = where you're coming from
+dpgoto = where you're going
+
+In the .spt files:
+Neutral.spt (departure map)
+There will be a code block/entry — copy and paste it to add a new entry, and in the field that reads:
+*dp..................................................
+replace it, example:
+*dpgoto_(name of destination map)
+
+Meaning we're adding a code that sends us to this map.
+
+And in the .spt of the destination map, do the same, copying an entry and pasting it to add another one, and
+replace in the new entry the code:
+dp......................................................
+with
+dpfrom_(name of the map you came from).
+
+Meaning we're adding a code that shows you're coming from that map.
+
+Restart the server.

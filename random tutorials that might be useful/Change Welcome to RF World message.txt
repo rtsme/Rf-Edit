@@ -1,0 +1,5 @@
+The messages that appear when entering your character are here:
+
+Database RF_World
+
+table: dbo.tbl_GreetMsg

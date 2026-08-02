@@ -1,0 +1,41 @@
+If the update is working, check the patchinfo file in the www/Download/ folder.
+
+The password to open patchinfo.z is:
+dhelsaktmxj
+
+After extracting it, open patchinfo.txt and check the rf online.bin version number, e.g. a 999.999.999-style number — mine is:
+506345419
+
+Now open the client folder:
+
+In the filedata file in the client/system/ folder, open it and check whether the number matches the number in patchinfo.
+
+Its password is also: dhelsaktmxj
+Extract it and open its file in a text editor.
+
+If the numbers are different, the launcher will think there's a difference between the downloaded file and what it expects.
+
+So if your update is working, and you get this error when you click the server to play, you're probably loading filedata.z from your computer's/browser's cache.
+
+Press Windows + R and type: inetcpl.cpl
+
+Go to the "General" tab → "Browsing History" → click "Delete..."
+
+This will delete Internet Explorer's temporary files.
+
+Now open Chrome and press:
+
+Ctrl + Shift + Del
+
+The clear browsing data settings will open — clear the full cache for all time.
+
+Now press Windows + R and type: %temp% and delete everything inside that folder. Some files may not delete — that's fine, just delete what you can.
+
+Now go to client/system/ and delete the filedata.z file.
+
+Now open the launcher and let it update.
+
+Go back to the client/system/ folder and open filedata.z again, open the .dat file with a text editor, and check again whether the rfonline.bin number matches the patchinfo.z number — it should now match exactly, so you won't get the "Manipulated Files" error anymore.
+
+The password to open patchinfo.z and filedata.z is:
+dhelsaktmxj

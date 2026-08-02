@@ -1,0 +1,23 @@
+Open zoneguard.exe using Structorian
+Open the System option:
+You'll see:
+Take Delay MS: 400
+True Client Value: 500
+
+Open rf_online.bin using Structorian.
+You'll find a column named LootDelay — if yours is original, it's probably 500 (500 milliseconds = 0.5s delay).
+
+If you lower LootDelay to 400, in the Structorian window for zoneguard, in the True Client Value option, set the same value: 400, and Take Delay MS: always 100 less, so it becomes:
+
+In the zoneguard window:
+
+Take Delay MS: 300
+True Client Value: 400
+
+In the RF_Online.bin window:
+
+LootDelay: 400
+
+Note: DO NOT lower it below 300, because you'll get a lot of annoying "Item Routing Failed" errors on the player's screen — if 10 items drop on the ground, the player will probably only manage to grab about 7 quickly and will likely get the pickup error and lose around 3 items. So I recommend keeping LootDelay at 400, True Client Value at 400, and Take Delay MS at 300.
+
+If you don't mind and want it super fast at 300 anyway, you'll need to remove the "Item Routing Failed" message that shows on the player's screen — just open the client's NDLanguage, delete the message, and leave a blank space. The error will still happen in-game, but nothing will be displayed, so it won't annoy the player.

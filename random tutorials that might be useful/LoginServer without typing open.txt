@@ -1,0 +1,14 @@
+Make LoginServer work for player accounts without typing /open
+
+Open LoginServer with any hex editor
+I used (HxD)
+
+Search for the offset by pressing:
+ctrl + g
+
+BSB - 0000688E
+GU - 00006E0E
+
+Change the value from 00 to 01 and save.
+
+Tested on server 2.2.3.2 GU.

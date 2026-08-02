@@ -1,0 +1,14 @@
+Open your zoneserver.exe using a hex editor
+(HxD)
+
+Search for the offset:
+
+00028E7C6
+
+Change the value from 84 to 85
+
+Search for the offset:
+
+000215CE9
+
+Change the value from 74 to 75.

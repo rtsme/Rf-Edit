@@ -1,0 +1,22 @@
+Open ndstore and open your client's NDStore.edf.
+
+Find the NPC you want to add or remove the effect from.
+
+In this example I'll remove the gold effect from the "Golden Pig" NPC, which is at index: 265.
+
+Open the Npc.ini file in the client's chef folder and go to the same index, which in our case is 265.
+
+On that line you'll find:
+.\Chef\Eff\npc\GoldenPig.EFF
+
+This line is the path to where this NPC's effect file is located.
+
+To remove it, just delete this line, or comment it out by putting a # or ; before the line, so it becomes:
+
+#.\Chef\Eff\npc\GoldenPig.EFF
+
+or
+
+;.\Chef\Eff\npc\GoldenPig.EFF
+
+Note that the line will turn green if you're editing with Notepad — the effect has now been removed from the NPC, and the model will keep its original 3D color without the golden effect.

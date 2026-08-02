@@ -1,0 +1,89 @@
+--created by: Roslaw--
+--06-03-2013--
+
+Use RF_World
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+DECLARE @b1 int;
+DECLARE @b2 int;
+DECLARE @b3 int;
+DECLARE @b4 int;
+DECLARE @b5 int;
+DECLARE @br1 tinyint;
+DECLARE @br2 tinyint;
+DECLARE @br3 tinyint;
+DECLARE @br4 tinyint;
+DECLARE @br5 tinyint;
+
+DECLARE @c1 int;
+DECLARE @c2 int;
+DECLARE @c3 int;
+DECLARE @c4 int;
+DECLARE @c5 int;
+DECLARE @cr1 tinyint;
+DECLARE @cr2 tinyint;
+DECLARE @cr3 tinyint;
+DECLARE @cr4 tinyint;
+DECLARE @cr5 tinyint;
+
+DECLARE @a1 int;
+DECLARE @a2 int;
+DECLARE @a3 int;
+DECLARE @a4 int;
+DECLARE @a5 int;
+DECLARE @ar1 tinyint;
+DECLARE @ar2 tinyint;
+DECLARE @ar3 tinyint;
+DECLARE @ar4 tinyint;
+DECLARE @ar5 tinyint;
+
+SELECT @b1=Serial, @br1=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 0) as TempBD Where RankB = 1
+SELECT @b2=Serial, @br2=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 0) as TempBD Where RankB = 2
+SELECT @b3=Serial, @br3=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 0) as TempBD Where RankB = 3
+SELECT @b4=Serial, @br4=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 0) as TempBD Where RankB = 4
+SELECT @b5=Serial, @br5=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 0) as TempBD Where RankB = 5
+
+SELECT @c1=Serial, @cr1=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 1) as TempBD Where RankB = 1
+SELECT @c2=Serial, @cr2=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 1) as TempBD Where RankB = 2
+SELECT @c3=Serial, @cr3=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 1) as TempBD Where RankB = 3
+SELECT @c4=Serial, @cr4=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 1) as TempBD Where RankB = 4
+SELECT @c5=Serial, @cr5=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 1) as TempBD Where RankB = 5
+
+SELECT @a1=Serial, @ar1=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 2) as TempBD Where RankB = 1
+SELECT @a2=Serial, @ar2=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 2) as TempBD Where RankB = 2
+SELECT @a3=Serial, @ar3=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 2) as TempBD Where RankB = 3
+SELECT @a4=Serial, @ar4=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 2) as TempBD Where RankB = 4
+SELECT @a5=Serial, @ar5=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 2) as TempBD Where RankB = 5
+
+BEGIN
+Update tbl_honor_guild
+Set DCK = '1', IsNext = '1', dtDisable = getdate()
+Where DCK = '0'
+END
+
+BEGIN
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@br1, @b1, 15, 0)
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@br2, @b2, 15, 0)
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@br3, @b3, 10, 0)
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@br4, @b4, 5, 0)
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@br5, @b5, 5, 0)
+
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@cr1, @c1, 15, 0)
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@cr2, @c2, 15, 0)
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@cr3, @c3, 10, 0)
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@cr4, @c4, 5, 0)
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@cr5, @c5, 5, 0)
+
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@ar1, @a1, 15, 0)
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@ar2, @a2, 15, 0)
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@ar3, @a3, 10, 0)
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@ar4, @a4, 5, 0)
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@ar5, @a5, 5, 0)
+END
+GO

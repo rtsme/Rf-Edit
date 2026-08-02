@@ -1,0 +1,97 @@
+Open the server's map.dat file with 010 Editor.
+
+Also check the other map tutorial, or open the server's map .spt file to add the dpfrom code or change the location there too.
+Because if you change the location in map.edf, you also need to set the same location in the server's map .spt file.
+
+Use the template:
+[client]map_216
+[client]map_223
+[client]map_222f
+[client]map_224
+
+Pick the version matching your server — in my case my server is 2.2.3.2, so I pick "[client]map_223f"
+
+A list of all maps will appear — let's change the portal button located at the end of the Elf map.
+
+The Elf map is in the menu:
+struct maps map[27]
+Meaning it's map number [27]
+Open the menu
+"struct maps map[27]"
+Several menus will appear.
+Let's edit this one:
+"struct portalMapLinks[2]
+This number [2] means there are 2 portals inside Elf.
+Open this menu:
+"struct portalMapLinks[2]
+2 menus will appear, representing the locations of the 2 portals inside Elf — we'll edit the portal at the end of the map.
+
+Open the menu:
+"struct portalMapLinks[0]
+This menu has other sub-menus, which I'll explain:
+
+int linkMapIndex: "this number is the map linked to this button"
+
+int linkPortalIndex: "this number is the map's coordinate"
+
+Now open the menu for the map we're going to link to the Elf map button.
+
+I'll pick the Sette map, so when someone clicks the portal button at the end of the Elf map, the character will go to Sette.
+
+The Sette map is in the menu:
+struct maps map[11]
+
+We have Sette's map number, which is [11]
+
+Let's go back to map [27]'s menus to put the number 11 there.
+
+So go to the menu:
+struct maps map[27] and open it.
+Several menus appear.
+Go to the menu:
+"struct portalMapLinks[2]" and open it.
+Other menus appear, which are the maps inside Elf.
+Let's edit the menu:
+"struct portalMapLinks[0], open it.
+Two more menus appear:
+
+"int linkMapIndex"
+"int linkPortalIndex"
+
+int linkMapIndex: "change this number to the number matching the map you want to go to when clicking the portal button"
+Set it to [11], matching the Sette map.
+It becomes:
+
+"int linkMapIndex" 11
+Now, when clicking the portal button at the end of Elf, we'll be moved to Sette.
+
+Now we need to set the location we'll land at in Sette. Notice that the menu:
+"int linkPortalIndex" has the number 4, meaning we'll land at location 4 of the Sette map.
+Go to the Sette map's menu:
+"struct maps map[11], open it.
+Below there's a menu:
+"struct PORTAL_INFO pPortalInfo[10]" open it.
+This menu means there are [10] locations on the Sette map, but we'll go to location [4], which is selected on the Elf portal button.
+
+Open the menu:
+"struct PORTAL_INFO pPortalInfo[4]
+Several menus appear below.
+Let's look at:
+float x " -3757
+float y " -46
+float z " 2713
+These floats are the coordinates — go in-game and type the command:
+%jump Sette
+and after this command, type the float coordinates, becoming:
+
+%jump Sette -3757 -46 2713
+
+Press enter.
+Now we know that the Elf portal button will send us to map [11], which is Sette, and we also know we'll land at location [4] in Sette.
+You can change the [4] number in map [27]'s menu for a different one — in my maps file I have [10] locations in map [11] Sette.
+After deciding which location you want the Elf portal button to send you to, just save your file and copy it to the client's DataTable.
+Copy this file to the folder:
+client: DataTable/ here.
+If your dataTable has more folders inside, like:
+en-gb and others, then copy it into those too.
+Don't forget to convert the map.dat file to map.edf before pasting it into the Client folders.

@@ -1,0 +1,45 @@
+Increase the bonus PT gained when promoting a class at level 30.
+
+Open the client's character.edf file using Structorian.
+
+Open the server script's class.dat file using 010 Editor.
+
+In Structorian, go to the Class table and find the class you want to edit.
+
+You'll see some tables named:
+
+Bonus PT jb
+
+Bonus PT special skill (I believe this is for Summoner, Turret user, and Pilot)
+
+Bonus PT magic (I believe this is for Mage PTs)
+
+Bonus PT shield (shield PT is for tankers)
+
+Bonus PT def (defense PT)
+
+The class you're editing will have some of these bonus columns already filled with numbers.
+
+Whatever is at zero, leave it at zero.
+
+In this example I'll edit:
+Bonus PT special skill for the Summoner class.
+
+I'll increase the number and save.
+
+Now in the class.dat file in 010 Editor, I also need to go to the Summoner class — if you found the class in Structorian, just go to the same id (number) in 010 Editor, example:
+
+The Summoner class is at id number 92.
+
+So in 010 Editor go to row 92 and open it.
+
+You'll find a line named:
+BnsSMastery, which will have the same numbers as the column you edited in Structorian.
+
+Just put the same number you set in Structorian, example:
+
+If you set the "special skill PT" column to: 1000
+
+The BnsSMastery line also needs to be set to: 1000
+
+Now just save, close the server, put the new character file in the client's DataTable folder, put class.dat in the server's Script folder, and restart the server.

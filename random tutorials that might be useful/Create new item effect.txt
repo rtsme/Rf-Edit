@@ -1,0 +1,109 @@
+Open item.dat and go to the item.
+Copy the idmodel and open the file:
+client/chef/effectFileList.txt
+Find an empty line or create a new one.
+Copy any line and paste it into your new line, example:
+.\chef\eff\weapon\spear.eff 0
+This line is where the game will read your new effect from — you can change the folder name and the effect, example:
+.\chef\eff\lanca\lanca.eff 0
+
+Here we changed the EFF file's name and the folder's name.
+
+Now go to the folder:
+Client/chef/eff/ and create a folder named "lanca"
+
+Copy any eff file into your "lanca" folder and rename that file to "lanca" as well.
+
+Now, in:
+client/chef/ open this file
+
+client/chef/itemEffectList.txt
+
+Go back to the item.dat file and copy the idmodel of the item you're editing.
+
+Go back to itemEffectList.txt
+
+Search for the copied idmodel.
+You'll see something like this:
+70050D 576    0    0    0     0    0
+                 ⬆
+             This number is the position of the effect in your file — since we created a new effect called lanca.eff in the EffectFileList.txt file, check the line number you created it at — I created it on the last line, which is 612.
+
+So in the itemEffectList.txt file
+we'll put our effect's number.
+
+Before:
+70050D 576    0    0    0     0    0
+
+After:
+70050D 612    0    0    0     0    0
+
+Go to the file
+Chef/PatternList.txt and also create a line at the same position as in EffectFileList.txt.
+We created a line in the file
+EffectFileList.txt
+line number 612.
+
+So we'll also create a line at 612 in the file
+Chef/PatternList.txt
+
+And edit it to read:
+612 612 612 612 612 612 612 612 612
+
+Now in the file:
+Chef/particle.ini
+Let's change line 2
+MAXPARTICLE=
+increasing it by one line.
+Example:
+Original
+MAXPARTICLE=959
+
+With one more line:
+MAXPARTICLE=960
+
+Now this means we need to go to line 960 and create it.
+
+Copy any entry from any line, example:
+
+[PARTICLE959]
+Index = 959
+Absaxis= 0
+PARTICLE=./CHEF/unick_up/shield120.spt
+
+Paste it into your line 960, so it becomes:
+[PARTICLE959]
+Index = 959
+Absaxis= 0
+PARTICLE=./CHEF/unick_up/shield120.spt
+
+Edit the particle and index number so it becomes:
+
+[PARTICLE960]
+Index = 960
+Absaxis= 0
+PARTICLE=./CHEF/unick_up/shield120.spt
+
+This particle line:
+PARTICLE=./CHEF/unick_up/shield120.spt
+
+Is the file that gives your effect its color.
+You can't use this line as-is, because if you edit it, every item using this file will also be changed.
+
+The ideal approach is to copy all the contents of that folder into the folder we created earlier.
+
+So your entry will become:
+
+[PARTICLE960]
+Index = 960
+Absaxis= 0
+PARTICLE=./CHEF/lança/shield120.spt
+
+Rename this spt file to a new name, so it becomes:
+
+[PARTICLE960]
+Index = 960
+Absaxis= 0
+PARTICLE=./CHEF/lanca/lanca120.spt
+
+Done — we've created the new effect.

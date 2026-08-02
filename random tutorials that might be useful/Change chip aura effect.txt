@@ -1,0 +1,12 @@
+In the file: Cliente/chef/particle.ini it's found on line 181
+Its name is
+
+\Chef\Up\Cry_box\aura_00.spt
+
+You can find this spt inside the file
+ChefEntity1.rpk
+
+Located in the folder:
+up/cry_box/
+
+Note: you can create an image to display above the chip, or even a name like: CHIP BELL

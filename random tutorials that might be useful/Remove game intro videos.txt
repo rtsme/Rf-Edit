@@ -1,0 +1,1 @@
+Just go to the client/Snd/Bgm/ folder and delete the avi and wmv files, or create new files with the same names but with 0 bytes of data.

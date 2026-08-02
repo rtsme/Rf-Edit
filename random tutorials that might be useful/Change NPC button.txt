@@ -1,0 +1,30 @@
+Open the file
+
+NDstore.strs and NDstore.dat.
+Find the NPC you want to change
+Example: weapon type B which is at code
+140.
+Open the file Storelist.strs and Storelist.dat
+Go to code 140, matching the NDstore file's code.
+You'll find the column (1*Npc_class), which is the NPC's first button.
+Edit the number to 1.
+Number 1 is for trade/sell.
+
+Do the same above in the file Store.strs and store.dat too. Whenever you edit NPCs,
+you need to edit the files
+Storelist.dat and store.dat identically, so it doesn't break.
+
+In the Storelist file.
+Further down you'll find the column
+(Store_List count), which is the number of things inside the NPC.
+
+Further down you'll find the column
+(Item Up code), which is the equipment upgrade — if it's a weapon or set, you use this for the talisman slot.
+
+Toward the end of the table you'll find the columns (strlitemCode and MaxCount)
+This field is for setting a purchase limit on the item.
+Example: put the item's code in the column
+(strlitemCode) and the quantity available for sale in the column (MaxCount)
+Note: in the columns (strlitemlist) and (strlitemCode) you need to use the same matching item code.
+Example, the columns
+(1*strlitemlist) and (1*strlitemCode) need to have the same item code you want to put a sale limit on.

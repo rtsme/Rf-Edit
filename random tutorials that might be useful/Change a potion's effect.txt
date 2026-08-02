@@ -1,0 +1,72 @@
+Open the file PotionItemEffect.strs using Structorian.
+
+Open the file PotionItemEffect.dat, located in the server's RF_Bin/Script/..... folder.
+
+Using the program "RF Online Codes by Nitemare" you can go to the potions menu and find the potion you want to edit — in this case we'll edit the Gold Capsule +29, which is at index=404.
+
+Now in Structorian, go to index 404, matching the index in "RF Online Codes".
+
+Browsing the side columns we find the column:
+m_fTempValue, which has the value 29, meaning that using this capsule gives you 29 gold points — so if we change this value to 100, you'll receive 100 when you use the capsule.
+
+Now just save, replace it in the server's script folder, and restart the server.
+
+But if you want to change the received effect, here's the effect list below:
+
+enum PotEff
+{
+    None=-1,
+    Tranquility=0,
+    Entangle=1,
+    Dodge3=3,
+    Stealth=5,
+    Def5=6,
+    MaxHP1=9,
+    HPResPercent=10,
+    SkillDelay=12,
+    HPRes=14,
+    FPRes=15,
+    SPRes=16,
+    OpticPasly=18,
+    Speed=20,
+    TrapDetect=23,
+    Wolf=24,
+    Vamp1=27,
+    Purge=28,
+    Protect=29,
+    Escape=30,
+    DefGau=31,
+    Atk4=32,
+    Def4=33,
+    Mining2=34,
+    BlowUp=35,
+    DropRate=36,
+    HP3=37,
+    FP3=38,
+    SP3=39,
+    Accuracy1=40,
+    Chaos1=43,
+    ChaosCure1=44,
+    ClassRed=45,
+    Nuke=46,
+    NameCHG=47,
+    Summon1=48,
+    Tele1=49,
+    ExpPercent=50,
+    ExpNumber=51,
+    Revive1=52,
+    Potsx2x1=53,
+    Storage=54,
+    Stigma=55,
+    Scar=56,
+    GoldCapsule=57,
+    MeleePt=58,
+    RangePt=59,
+    DefePt=60,
+    ForcePt=61,
+    ShieldPt=62,
+    RacePt=63,
+    AllPt=64
+}
+
+In the column: nTempEffectType you'll find the effect number the capsule is using, which is 57.

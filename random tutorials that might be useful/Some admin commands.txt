@@ -1,0 +1,202 @@
+#################################################
+
+%neverdie 1
+%neverdie 0
+
+(put 1 in front to enable or 0 to disable)
+"This command makes you invincible"
+
+#################################################
+
+%moncall
+
+(put the monster's code in front to summon the monster to your location)
+
+example: %moncall 0920B
+
+If you want to summon several of the same mob, just add the quantity number after it.
+
+example: %moncall 0920B 5
+
+This will summon 5 mobs matching that code.
+
+#################################################
+
+%gold
+
+(put the value in front to add gold)
+
+example: %gold 5000
+
+You'll receive 5000 gold.
+
+#################################################
+
+%money
+
+(put the value to add dalant)
+
+example: %money 5000000
+
+You'll receive 5kk = 5,000,000 money
+
+#################################################
+
+%matchless 1
+%matchless 0
+
+(put 1 to enable or 0 to disable)
+"This code makes you kill anything in 1 hit without a skill"
+
+#################################################
+
+%allskill 10000000000
+
+(code to give full skill and GM PT to the character using it — only useful if your server isn't already GM-PT and you want to quickly become GM.)
+
+#################################################
+
+!Good night
+
+This command sends the message "Good night" in chat for all players to see — the popup that appears when the admin is speaking.
+
+Note: always use the ! sign before the message.
+
+#################################################
+
+%lv65
+
+(code to quickly level up to lv65)
+
+#################################################
+
+%port 0
+%port 1
+%port 2
+
+(code to quickly go to your base — 0=bell 1=cora 2=acc)
+
+#################################################
+
+%town
+
+(to go to the front of the base)
+
+This command takes you to the front of your character's race's base.
+
+#################################################
+
+%bags
+
+(drops 4 bags on the ground)
+
+#################################################
+
+%*
+
+(put the item's code after it and it drops on the ground)
+
+Example: %*iwspb50
+
+This command will drop a level 50 spear.
+
+The command %* followed by the item's code will drop the item on the ground.
+
+#################################################
+
+%contribute_m
+
+(put the amount of PvP points you want)
+Example: %contribute_m 999999
+
+You'll receive 999999 PvP points
+
+#################################################
+
+%contribute_p
+
+(put the amount of contribution points you want)
+
+Example: %contribute_p 999999
+
+#################################################
+
+$gm
+
+(put the welcome message all players receive on login after the code)
+
+Example: $gm Welcome to RF Space
+
+This command sets the welcome message shown in general chat when a player logs into the game.
+
+But if you restart the server, this message will be cleared.
+
+#################################################
+
+%monset 1
+%monset 0
+
+or
+
+%monset on
+%monset off
+
+(This command enables or disables monster spawning)
+I just don't remember which one is correct.
+
+#################################################
+
+%chip
+
+(code to quickly move to chip war — put the number after the code, 0=bell 1=cora 2=acc)
+
+Example: %chip 0
+
+This command will teleport you to Chip Bell
+
+#################################################
+
+%eder
+
+(code to move to the Ether base)
+I'm just not sure if you need to add 0, 1, or 2 depending on race, example:
+
+%eder 0
+"goes to the Bell Ether base"
+
+%eder 1
+"goes to the Cora Ether base"
+
+%eder 2
+"goes to the Acc Ether base"
+
+#################################################
+
+%transport
+
+(code to move to the Ether base)
+
+#################################################
+
+%hide 0
+%hide 1
+
+(put 1 to become invisible or 0 to disable)
+
+This command makes you invisible to the point that no one can see you, not even with charms or jades.
+
+#################################################
+
+%bufftime
+
+(duration of your buffs — put the time, example: %bufftime 9999)
+
+This command increases the duration of your buffs
+
+#################################################
+
+%bossme
+
+(code to enter the race leader list — use 1 through 9, example: %bossme 1)
+
+#################################################

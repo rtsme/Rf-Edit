@@ -1,0 +1,7 @@
+Open rfonline.bin using Strs with the Structorian program.
+
+In the menu [+] Cost Limit
+
+RegistArchon
+
+Change the value in the [Value] column

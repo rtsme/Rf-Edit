@@ -1,0 +1,117 @@
+In the file: NewHolySystem.ini, in the server/RF_Bin/Initialize/ folder.
+
+At the end of the file it says:
+[OreTotalAmount]
+Set = 1
+Minset = 20
+SET_3 = 500
+
+Explanation of what each one does below:
+
+---
+
+🔹 Set
+
+👉 Global ore quantity multiplier
+
+Think of it as:
+
+A scaling factor
+
+It multiplies the entire ore-generation logic
+
+Example:
+
+Set = 1 → default
+Set = 2 → double the ore on the map
+Set = 3 → triple the ore
+
+📌 It doesn't create ore by itself, it just increases how much the system can generate.
+
+---
+
+🔹 Minset
+
+👉 Minimum base amount of ore per vein
+
+This is the starting value used when the system calculates how much ore each vein can yield.
+
+Example:
+
+Minset = 20
+
+→ no vein will spawn with less than 20 units (before multipliers)
+
+📌 Setting this too high:
+
+Makes mining too fast
+
+Benefits bots
+
+Can break balance
+
+Usually:
+
+20 ~ 30 = safe
+
+---
+
+🔹 SET_3 (not "dat_3" 😉)
+
+👉 Maximum TOTAL ore stored on the map
+
+This is the most important one of all.
+
+Think of it like a reservoir:
+
+The map will never have more ore than this value
+
+As miners extract ore, it gets consumed
+
+The system keeps replenishing it up to this limit
+
+Example:
+
+SET_3 = 500 → little ore (default)
+SET_3 = 1500 → 3x more ore available
+SET_3 = 3000 → map always full
+
+📌 If SET_3 is too low:
+
+The map "dries up" fast
+
+Miners complain
+
+📌 If SET_3 is too high:
+
+There's always ore
+
+The economy inflates
+
+---
+
+🧠 Quick summary (in one line)
+
+Parameter | What it does
+
+Set → Multiplies total generation
+Minset → Minimum ore per vein
+SET_3 → Map's maximum stock
+
+---
+
+🔥 Balanced configuration (recommended)
+
+Set = 2
+Minset = 20
+SET_3 = 1500
+
+Good for:
+
+Mid-rate server
+
+No drying up maps
+
+No breaking the economy
+
+---

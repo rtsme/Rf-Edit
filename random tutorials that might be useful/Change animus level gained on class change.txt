@@ -1,0 +1,43 @@
+Change the animus level gained when switching class at lv40
+
+Open your client's character.edf using Structorian.
+
+Open the server's class.dat using 010 Editor.
+
+In 010 Editor find the column
+"struct CLASS class[92]"
+Open it and find the column
+"struct RewardItem m_strDefaultItem[9]"
+Open it and there will be several columns below.
+The column:
+"struct RewardItem m_strDefaultItem[0]"
+has the code:
+ijccc01 — this is Paimon.
+Below the code there's:
+int Amount:
+"this number represents the total xp it will have when you pick it during the class change"
+
+In Structorian, with character open, go to the Paimon Animus menu.
+
+There will be a column:
+ForLvlUpExp = the total xp needed to level up to each level.
+
+Find the xp that matches the "int Amount" column in 010 Editor.
+
+Example: if "int Amount" in 010 Editor is: 200
+
+The number 200 in Structorian, in the column:
+ForLvlUpExp = is shown at level 1.
+But it actually becomes level 2.
+
+So whenever you edit and pick a level, you need to grab the xp number from the previous level.
+
+If you pick level 40,
+then just grab the xp for level 39,
+copy it and paste it into the "int Amount" column in 010 Editor.
+
+IT IS VERY IMPORTANT THAT IF YOU'RE EDITING PAIMON, YOU TAKE THE XP FROM THE PAIMON MENU IN CHARACTER IN STRUCTORIAN.
+
+IF YOU'RE EDITING ISIS, TAKE THE XP FROM ISIS IN STRUCTORIAN, AND SO ON.
+
+DO NOT TAKE THE XP FROM ONE ANIMUS AND PASTE IT INTO ANOTHER, SINCE EACH ANIMUS HAS DIFFERENT XP.

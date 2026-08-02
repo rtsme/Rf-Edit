@@ -1,0 +1,15 @@
+In the client file:
+
+SpriteImage/eng-gb/common.spr
+
+File common-8-23.dds is the premium image shown on the loading screen when opening the game.
+
+File common-8-26.dds is the premium image shown in-game below the PvP point/Gold point banner.
+
+When creating the new common.spr, replace "common" in the folders:
+
+SpriteImage/en-gb
+SpriteImage/en-id
+SpriteImage/en-ph
+SpriteImage/pt-br
+SpriteImage/ru-ru

@@ -1,0 +1,13 @@
+Unlock quest lv50-56
+
+Edit the quest file rf\server\zoneserver\RF_Bin\Script\QuestLvlLimitEvent.dat, open it using a hex editor.
+
+You'll see a list of codes like this:
+
+02 00 00 00 51 00 00 00 88 08 00 00 00 00 00 00
+
+Edit the 02 to 00 and select the whole list after 88-08-00-00 and delete it, leaving only:
+
+00 00 00 00 51 00 00 00 88 08 00 00
+
+Save and click yes to delete the history data. Done.

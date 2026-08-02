@@ -1,0 +1,3 @@
+Open NDCharacter.edf, located in the folder:
+DataTable/en-gb/
+It can be opened with Structorian.

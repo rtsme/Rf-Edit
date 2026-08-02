@@ -1,0 +1,26 @@
+To set the maximum auction value, use the query below.
+
+Tested only on server 2232.
+
+This query will let a player register a maximum value of 999m, preventing them from registering above 1b, and consequently preventing the game from crashing for anyone trying to buy items priced above 1b.
+
+
+USE [RF_WORLD]
+GO
+
+-- 1. First, remove the old constraint if it exists
+IF EXISTS (SELECT * FROM sys.check_constraints WHERE name = 'CK_tbl_utsellinfo' AND parent_object_id = OBJECT_ID('tbl_utsellinfo'))
+BEGIN
+    ALTER TABLE [dbo].[tbl_utsellinfo] DROP CONSTRAINT [CK_tbl_utsellinfo]
+END
+GO
+
+-- 2. Add the new constraint: price must be LESS THAN OR EQUAL TO 1 billion
+-- We also make sure the price is greater than 0 to avoid bugs
+ALTER TABLE [dbo].[tbl_utsellinfo] WITH NOCHECK
+ADD CONSTRAINT [CK_tbl_utsellinfo] CHECK (([price] <= (999999999) AND [price] > (0)))
+GO
+
+-- 3. Enable the constraint check
+ALTER TABLE [dbo].[tbl_utsellinfo] CHECK CONSTRAINT [CK_tbl_utsellinfo]
+GO

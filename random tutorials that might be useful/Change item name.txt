@@ -1,0 +1,4 @@
+To change an item's name in-game
+Open the file:
+
+Client/DataTable/En-gb/NDItem.edf

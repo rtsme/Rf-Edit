@@ -1,0 +1,20 @@
+To make an item not expire.
+
+Open item.edf on the client side.
+Navigate to the desired item and find the column isTime = 1
+Change it to 0, so it becomes:
+isTime = 0
+
+Open TimerItem.dat on the server side.
+
+Find the item and in the column:
+m_nCheckType, set it to 0
+
+Now, to just change the expiration time instead, edit these columns in the file:
+TimerItem.dat:
+Day = days
+Hour = hours
+Minute = minutes
+Sec = seconds
+
+That's all you need.

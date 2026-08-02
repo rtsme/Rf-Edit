@@ -1,0 +1,9 @@
+#   1. Python 3.7 or newer.
+#         Verified on 3.11.0, 3.12.5 and 3.14.3. 3.7 is the floor because of
+#         argparse's required= on subparsers and guaranteed dict ordering;
+#         anything older is untested.
+# Paths are not baked in. Override these environment variables on a new
+# machine, or just use the GUI's Open Server / Open Repo buttons:
+#
+#   RF_SERVER_DIR   default server root, e.g. D:\rf\1_Server AOP
+#   RF_SCRIPT_DIR   default folder for rf_editor.py / verify_all.py

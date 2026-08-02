@@ -1,0 +1,31 @@
+```css
+#define item_tbl_num                26    // number of item tables
+#define    tbl_code_upper                0    // upper body
+#define    tbl_code_lower                1    // lower body
+#define    tbl_code_gauntlet            2    // gloves
+#define    tbl_code_shoe                3    // shoes
+#define    tbl_code_helmet                4    // helmet
+#define    tbl_code_shield                5    // shield
+#define    tbl_code_weapon                6    // weapon
+#define tbl_code_cloak                7    // cloak
+#define tbl_code_ring                8    // ring
+#define tbl_code_amulet                9    // amulet
+#define tbl_code_bullet                10    // ammo/cartridge
+#define tbl_code_maketool            11    // item crafting tool
+#define tbl_code_bag                12    // bag
+#define tbl_code_potion                13    // potion
+#define tbl_code_face                14    // face
+#define tbl_code_fcitem                15    // force river item
+#define tbl_code_battery            16    // battery
+#define tbl_code_ore                17    // raw ore
+#define tbl_code_res                18    // gem
+#define tbl_code_key                19    // MAU equipment authentication key
+#define tbl_code_booty                20    // spoils/loot
+#define tbl_code_map                21    // minimap
+#define tbl_code_town                22    // return item
+#define tbl_code_bdungeon            23    // battle dungeon creation item
+#define tbl_code_animus                24    // summon item
+#define tbl_code_tower                25    // guard tower
+```
+
+Note: this list originally included Korean-language comments next to each code, translated above for clarity.

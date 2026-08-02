@@ -1,0 +1,27 @@
+Use RF_World
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+DECLARE @a1 int;
+DECLARE @a2 int;
+DECLARE @ar1 tinyint;
+DECLARE @ar2 tinyint;
+
+SELECT @a1=Serial, @ar1=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 2) as TempBD Where RankB = 1
+SELECT @a2=Serial, @ar2=Race FROM (SELECT ROW_NUMBER() OVER(ORDER BY a2.Grade DESC, a1.GuildPower DESC) AS RankB, a2.Serial, a2.Race, a2.id, a2.Grade, a1.GuildPower  From tbl_GuildRankToday as a1, tbl_Guild as a2 Where a1.Serial = a2.Serial and a2.Race = 2) as TempBD Where RankB = 2
+BEGIN
+Update tbl_honor_guild
+Set DCK = '1', IsNext = '1', dtDisable = getdate()
+Where DCK = '0'
+END
+
+BEGIN
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@ar1, @a1, 15, 0)
+INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@ar2, @a2, 15, 0)
+END
+GO

@@ -1,0 +1,25 @@
+Example:
+
+In the client's map.dat file, struct maps map 0, which is NeutralB, I set it to go to Dungeon03, and it's at index 21 in the menu struct PORTAL_INFO pPortalInfo
+
+resulting in dpgoto_dungeon03
+
+Note that the index for leaving NeutralB is 21.
+
+In the file: NeutralB-[PORTAL].dat, index 21 needs to have the call to go to Dungeon3.
+
+dpgoto_dungeon03
+Dungeon03
+dpfrom_neutralb
+
+If, in the client's map.dat file, the character's departure or return isn't at the same index as the departure/return in the [PORTAL] file, you'll get the "Teleport error data" error.
+
+They need to be at the same index.
+
+Same thing for the return trip.
+
+At index 22 of maps.dat I set dpfrom_dungeon03, meaning it comes from Dungeon03.
+
+Then in the [PORTAL] file for NeutralB, at that same index 22, you need to put that it's coming from Dungeon3:
+
+dpfrom_dungeon03.

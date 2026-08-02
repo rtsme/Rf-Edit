@@ -1,0 +1,65 @@
+To edit combinations at the Hero NPC, open the files: CombineTable.dat and CombineTable2.dat
+Located in the server's script folder.
+
+Using 010 Editor.
+
+Let's use T5 as an example — by default you combine 1 at a time at the Hero.
+
+Important detail: the combination might be in either of these two files:
+
+CombineTable.dat and CombineTable2.dat
+
+###########
+
+Searching for T5's code: iycsa13, we find it at id: 516 in the CombineTable.dat file.
+
+Opening its id we find a column named:
+
+Struct LinkedMaterial material[5]
+Opening it, 5 new columns appear below it, named:
+
+Struct LinkedMaterial material[0]
+Struct LinkedMaterial material[1]
+Struct LinkedMaterial material[2]
+Struct LinkedMaterial material[3]
+Struct LinkedMaterial material[4]
+
+Opening number 0:
+
+Struct LinkedMaterial material[0]
+
+Below it you'll see:
+
+Char itemCode: the item's code.
+
+Uint upgrades: the available slots on the item.
+
+Int quantity: the amount of the item to put at the Hero — in this case we'll set 99.
+
+So when we go to the Hero, we'll put 99 T5s.
+
+Now we need to change the item's result.
+
+The result will be in the column:
+
+Struct LinkedResults result[24]
+
+Now we know there are 24 result columns — since we know T4 gives 4 gems as a result.
+
+So let's open the first 4 result columns and change int totalOut to 99
+
+int totalOut: 99
+
+This means the 4 gems received will each come out in a quantity of 99.
+
+Now just save the server's dat file.
+
+Now, to generate the client file, we'll use the program: matchingTool.
+
+Just create a folder, put matchingTool inside it, put the files:
+
+CombineTable.dat and CombineTable2.dat and LinkedStuff.dat
+
+Inside that folder and open the program, go to option 9, and it will generate a folder with a client file inside it.
+
+This generated file will replace the file in the client's dataTable folder.

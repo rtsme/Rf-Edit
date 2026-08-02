@@ -1,0 +1,83 @@
+###############################################
+Side: CLIENT
+###############################################
+
+Open the Exp.dat file, located in the server's script folder, using Structorian.
+If the cap is up to level 50, you'll need to go to row 49 and copy the exp number, example:
+18387172493401, matching the lv49 row — copy this row.
+
+Now open another Structorian window and open your client's character.edf file.
+Go to the option: Player Experience.
+
+Now search using Ctrl+F and paste the number for the level you'll set as the cap — in my case my cap is 50, so I need the same number as level 49 in exp.dat, which is: 18387172493401
+You'll land on this row.
+Now you'll see there are 3 columns: Bell, Cora, Acc — on the same row, click on the same number: 18387172493401 in the Acc column.
+
+Now you'll need to delete the blocks of data from this row onward, up to the last row of the Acc column — use HxD to delete the blocks.
+But before deleting the blocks, count how many rows there are from your row to the last row.
+In my case there were 16 rows, since my cap was lv65 (matching row number 54).
+So now row 49 + 16 = 65
+
+After deleting in HxD you'll need to fix the block count — reopen the character.edf file you edited in HxD, and in the option: CharacterFile, click it.
+There will be a column Name, and you'll go to the row that says: PlayerExpBlocks.
+Change it to the new number, example: if it was 66 and you deleted 16 rows, the new number is 50.
+
+Save and reopen the file — it should now open correctly with all the data.
+
+Check in the PlayerExperience option, on the last row, whether it reads:
+
+Bell:
+18387172493401
+Cora:
+18387172493401
+Acc:
+18387172493401
+
+All matching — if so, you did it right.
+
+###############################################
+Side: SERVER
+###############################################
+
+Now you'll need to repeat this in the server's Exp.dat file.
+Go to the Acc exp column for level 49 and delete all rows below it using HxD, and also update the block count in the menu: Exp.dat, line: Blocks.
+Example: if you deleted 16 rows, subtract 16 from the current Blocks number and set the new value.
+
+You'll see the last row, 49, will have the same number as the last row of PlayerExperience in the client's character file — both should match.
+
+###############################################
+
+Now, in a new Structorian window, open your zoneguard.exe and in the menu:
+AnimusTweaks/UnlockLv: you'll need to set "Last Animus Level" to 50, since the cap is 50.
+Also do this in:
+AnimusTweaks/UnlockExp: you'll need to set "Last Animus Level" to 50, since the cap is 50.
+
+###############################################
+
+Now you'll also need to delete the blocks for the animus in the files:
+HecateCharacter.dat
+InannaCharacter.dat
+IsisCharacter.dat
+PaymonCharacter.dat
+
+But this time you'll need to delete from level 50 onward, not like the Exp.dat and Character.edf files where we deleted from 49 onward — this time it's from 50 onward.
+
+This way there's no risk of a player ending up above the level cap, or their Animus ending up above the cap either.
+
+###############################################
+
+Now you'll also need to change the max level in the server's database.
+Open SQL Server Manager
+and go to the database: RF_World:
+open Tables and scroll down until you find dbo.tbl_general, open it, then open Columns.
+Now right-click on the word: Serial and click Modify.
+Now scroll down, near the last row it reads: MaxLevel.
+Click MaxLevel and options will open below, with a number next to where it reads:
+Default Value or Binding ((65)) — change it to 50 and press enter to save.
+Exit and verify the 50 was saved.
+
+This matters because if a player modifies their client files and you forgot to edit exp.dat or the animus.dat files, they'd still be able to level up.
+
+Editing this means even if they level up, it won't be saved server-side — it will only save what's set in your database, at most.
+
+###############################################

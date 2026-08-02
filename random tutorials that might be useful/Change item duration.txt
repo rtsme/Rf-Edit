@@ -1,0 +1,23 @@
+Let's use the cham as an example — open the file resourcesitem.txt in Excel, and find the item by its server code, example: ircsa31
+
+In its row there's a column called isTime with a value of 0 or 1, 0 for no and 1 for yes.
+
+To remove its time limit entirely, just change it to 0 in isTime and generate the server's new resourcesitem.dat.
+
+On the client side, you also need to find the isTime column in the item.edf file, on the item's row, and also set it to 0.
+
+Done, the item is now permanent.
+
+Now, to change the item's time duration instead, you need to open the TimerItem.dat file using 010 Editor, or Timeritem.txt using Excel, and search for the item's code, in this example ircsa31.
+
+Once you find it, you'll see the "time" column, with fairly large numbers in seconds, example: 2592000, which equals 30 days total — just change these seconds, you can use a seconds-to-days calculator to get the correct number of seconds.
+
+After setting the new value in seconds, do the same in the client's ItemTimer.edf file, which also has a time column — both need to have the same number of seconds to stay in sync.
+
+Note: the ItemTimer and TimerItem tables must match.
+
+When saving both, save as text, tab-separated.
+
+Go to http://localhost/parser/php2.8/server.php to generate the server's TimerItem.dat
+
+And then go to: http://localhost/parser/php2.8/timeritem.php to generate the client's ItemTimer.edf in the folder gu_out/itemtimer/

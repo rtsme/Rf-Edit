@@ -1,0 +1,74 @@
+Open ndstore using Structorian and find the NPC's index.
+In this example, the index:
+162 Temple of Honor Bellato
+163 Temple of Honor Cora
+164 Temple of Honor Acc
+
+is the giant statue NPC located at the base near the portal — let's edit it.
+
+Open the server's storelist.dat and go to the same index of the NPC you picked, in our case the giant statue.
+
+There will be a column: strStore_NPCcode with the model's name, in this case:
+
+at index 162 the model number is: 03132
+at index 163 the model number is: 04132
+at index 164 the model number is: 05132
+
+Now open the client's resources.edf using Structorian and in the menu: npc mesh, open it and search for the model number in the ID column:
+
+03132 Bellato statue
+04132 Cora statue
+05132 Acc statue
+
+When you search and go to its row, in the columns ahead you'll see the mesh model's name:
+
+NEUTRALB_EVENTNPC_002.MSH bell
+NEUTRALC_EVENTNPC_002.MSH cora
+NEUTRALA_EVENTNPC_002.MSH acc
+
+Now that you know the mesh name, just open it in 3ds Max.
+
+I opened 3ds Max and looked for these meshes, but they're packed inside an rfs file.
+
+The file's name is: hof.RFS
+
+Use RD Decrypt to unpack it, and then edit the model's height in 3ds Max.
+
+After editing the model and generating the new hof.RFS, replace it on the client and the model will now be the height you edited.
+
+But it's not over yet.
+
+Now you also need to edit the file with the same name but a .bn extension.
+
+Example:
+
+If the mesh is named:
+
+NEUTRALB_EVENTNPC_002.MSH bell
+NEUTRALC_EVENTNPC_002.MSH cora
+NEUTRALA_EVENTNPC_002.MSH acc
+
+The bone is named:
+
+NEUTRALB_EVENTNPC_002.bn bell
+NEUTRALC_EVENTNPC_002.bn cora
+NEUTRALA_EVENTNPC_002.bn acc
+
+Open them in 3ds Max and also edit them to the same height you set for the mesh models.
+
+Export using the option to generate the new bone .bn file.
+
+When exporting it will generate the new .bn bone and a new .bbx.
+
+Take the .bn and .bbx files and replace them on the client, example:
+
+NEUTRALB_EVENTNPC_002.bn bell
+NEUTRALB_EVENTNPC_002.BBX bell
+
+NEUTRALC_EVENTNPC_002.bn cora
+NEUTRALC_EVENTNPC_002.BBX cora
+
+NEUTRALA_EVENTNPC_002.bn acc
+NEUTRALA_EVENTNPC_002.BBX acc
+
+Done — now the NPC's name will sit properly above it instead of floating up high like before.

@@ -1,0 +1,14 @@
+Open the file character.strs
+
+Convert the character.edf from the client folder into .dat
+
+Open character.dat using character.strs
+
+You'll find a column named
+Mobsize
+or
+--8_float--
+
+This is the mob's height.
+
+Recommendation: find a mob that already has the height you want, copy the numbers from its column, and paste them onto the monster you want to edit.
