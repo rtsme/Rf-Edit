@@ -405,14 +405,17 @@ def _looks_like_string_slot(records, pos, width):
     return saw_text
 
 
-def infer_schema(records, rec_size, width=64):
+def infer_schema(records, rec_size, width=64, string_widths=None,
+                 allow_short_numbers=False):
     """Work out a layout from the record bytes themselves.
 
     For the thousands of per-map tables there is no reference schema anywhere,
     so the alternative to this is treating them as opaque. The rule is simple
-    and evidence-driven: walk the record, and take a 64-byte string slot
+    and evidence-driven: walk the record, and take a known-width string slot
     wherever the bytes across every record actually behave like one, otherwise
-    take a 4-byte number.
+    take a 4-byte number. Client EDF callers also allow 4-byte code strings and
+    final 2/1-byte numeric fields; server DAT inference keeps the conservative
+    historical defaults.
 
     Byte-exactness is guaranteed either way -- both readings re-encode to the
     same bytes -- so what this buys is *labels*: text shows up as text instead
@@ -421,16 +424,29 @@ def infer_schema(records, rec_size, width=64):
     fields = [("Index", "dword")]
     pos = 4
     nstr = nnum = 0
+    widths = tuple(string_widths or (width,))
     while pos < rec_size:
-        if pos + width <= rec_size and _looks_like_string_slot(records, pos, width):
+        slot_width = next(
+            (candidate for candidate in widths
+             if pos + candidate <= rec_size
+             and _looks_like_string_slot(records, pos, candidate)), None)
+        if slot_width is not None:
             nstr += 1
             fields.append(("Text%d" % nstr if nstr > 1 else "Code",
-                           "string[%d]" % width))
-            pos += width
+                           "string[%d]" % slot_width))
+            pos += slot_width
         elif pos + 4 <= rec_size:
             nnum += 1
             fields.append(("Val%d" % nnum, "dword"))
             pos += 4
+        elif allow_short_numbers and pos + 2 <= rec_size:
+            nnum += 1
+            fields.append(("Val%d" % nnum, "word"))
+            pos += 2
+        elif allow_short_numbers and pos + 1 <= rec_size:
+            nnum += 1
+            fields.append(("Val%d" % nnum, "byte"))
+            pos += 1
         else:
             raise SchemaError(
                 "record size %d leaves %d trailing byte(s) that fit no field"
@@ -509,6 +525,10 @@ class Table(object):
         """Read a .dat, finding a schema automatically when one isn't given."""
         with open(path, "rb") as f:
             data = f.read()
+        if len(data) < HEADER_SIZE:
+            raise SchemaError(
+                "%s is too small to hold a %d-byte table header"
+                % (path, HEADER_SIZE))
         count, field_count, rec_size = struct.unpack_from(HEADER_FMT, data, 0)
         expected = HEADER_SIZE + count * rec_size
         if expected != len(data):

@@ -194,22 +194,25 @@ class Workbench(tk.Tk):
     def do_open_server(self):
         start = os.environ.get("RF_SERVER_DIR", "")
         path = filedialog.askdirectory(
-            title="Select the server root (the folder containing Zoneserver)",
+            title="Select the server or client root",
             initialdir=start if start and os.path.isdir(start) else None)
         if not path:
             return
-        n = len(rf_repo.find_dats(path))
-        if not n:
+        n_dat = len(rf_repo.find_dats(path))
+        n_edf = len(rf_repo.find_edfs(path))
+        if not n_dat and not n_edf:
             messagebox.showwarning(
-                "No .dat files",
-                "Found no .dat files anywhere under\n%s\n\nIs that the server "
-                "root?" % path)
+                "No RF data files",
+                "Found no .dat or .edf files anywhere under\n%s\n\nIs that "
+                "the server or client root?" % path)
             return
         self.server = path
-        self.lbl_server.config(text="Server: %s   (%d .dat files)" % (path, n))
+        self.lbl_server.config(
+            text="Source: %s   (%d .dat, %d .edf)"
+                 % (path, n_dat, n_edf))
         self._refresh_buttons()
-        self._say("Server opened: %d .dat files found. Create Repo to convert "
-                  "them." % n)
+        self._say("Source opened: %d .dat and %d .edf files found. Create "
+                  "Repo to convert them." % (n_dat, n_edf))
 
     def do_create_repo(self):
         repo = filedialog.askdirectory(
@@ -235,11 +238,12 @@ class Workbench(tk.Tk):
                 messagebox.showerror("Create failed", str(result))
                 self._say("Create failed.")
                 return
-            _manifest, tables, skipped = result
+            manifest, tables, skipped = result
             self.repo = repo
             self.lbl_repo.config(text="Repo:   %s" % repo)
-            self._say("Created repo: %d table(s) converted, %d skipped."
-                      % (len(tables), len(skipped)))
+            self._say(
+                "Created repo: %d DAT table(s), %d EDF file(s), %d skipped."
+                % (len(tables), len(manifest.get("edf", {})), len(skipped)))
             self._report_skipped(tables, skipped)
             self.do_preview()
 
@@ -286,8 +290,10 @@ class Workbench(tk.Tk):
                 "now. Use Open Server to point at it before building."
                 % self.server)
         self._refresh_buttons()
-        self._say("Repo opened: %d table(s). Press Preview Changes."
-                  % len(manifest.get("tables", {})))
+        self._say("Repo opened: %d DAT table(s), %d EDF file(s). Press "
+                  "Preview Changes."
+                  % (len(manifest.get("tables", {})),
+                     len(manifest.get("edf", {}))))
         self.do_preview()
 
     def do_preview(self):
@@ -308,7 +314,7 @@ class Workbench(tk.Tk):
             self._refresh_buttons()
             n_ch = sum(1 for s in result if s.state == Status.CHANGED)
             n_err = sum(1 for s in result if s.state == Status.ERROR)
-            self._say("Preview: %d changed, %d problem(s), %d table(s) total."
+            self._say("Preview: %d changed, %d problem(s), %d data item(s)."
                       % (n_ch, n_err, len(result)))
 
         self._run(work, done)
@@ -366,6 +372,10 @@ class Workbench(tk.Tk):
         if s.kind == Status.FILE:
             self._show_text_diff(rel)
             return
+        if s.kind == Status.EDF:
+            self.diff.insert("", "end", values=(
+                "", "encrypted client file", "live client", "repo build"))
+            return
         try:
             changes, delta = rf_repo.field_changes(self.repo, rel, self.server)
         except (SchemaError, ValueError, OSError) as e:
@@ -417,7 +427,7 @@ class Workbench(tk.Tk):
             listing += "\n  ... and %d more" % (len(pending) - 15)
         if not messagebox.askokcancel(
                 "Build to server",
-                "About to overwrite %d .dat file(s) in\n%s\n\n%s\n\nOriginals "
+                "About to overwrite %d data file(s) in\n%s\n\n%s\n\nOriginals "
                 "are backed up into the repo's backups/ folder first. "
                 "Continue?" % (len(pending), self.server, listing)):
             return

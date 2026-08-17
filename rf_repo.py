@@ -33,6 +33,8 @@ import time
 
 from rf_dat import (SchemaError, Table, read_schema_json, record_size,
                     write_schema_json)
+from rf_edf import (build_table_chain, decrypt_file, encrypt as encrypt_edf,
+                    parse_table_chain)
 
 MANIFEST = "rfrepo.json"
 
@@ -76,6 +78,9 @@ GITATTRIBUTES = """\
 # mixes both. -text switches off every conversion so a checkout reproduces the
 # exact bytes the server had. They still diff as text -- none contain NULs.
 files/** -text
+
+# Decrypted EDF payloads whose inner structure is unknown remain binary.
+blob/** binary
 """
 
 README_TEMPLATE = """\
@@ -94,6 +99,8 @@ Server this was created from:
   per record, first line is the field names.
 - `schemas/` the field order and types for each table, frozen here so a
   checkout can rebuild the `.dat` files without any external tooling.
+- Client `.edf` files are decrypted on import and re-encrypted on build. Clean
+  table chains live under `csv/<name>.edf/`; unsupported payloads under `blob/`.
 - `%(manifest)s` records the server path and a checksum per table.
 - `build/`, `backups/` generated, git-ignored.
 
@@ -133,6 +140,16 @@ def find_dats(root):
     for dirpath, _dirs, files in os.walk(root):
         for fn in files:
             if fn.lower().endswith(".dat"):
+                out.append(os.path.relpath(os.path.join(dirpath, fn), root))
+    return sorted(out)
+
+
+def find_edfs(root):
+    """Every .edf under root, as paths relative to root."""
+    out = []
+    for dirpath, _dirs, files in os.walk(root):
+        for fn in files:
+            if fn.lower().endswith(".edf"):
                 out.append(os.path.relpath(os.path.join(dirpath, fn), root))
     return sorted(out)
 
@@ -272,6 +289,10 @@ def create_repo(server_root, repo, progress=None, include=None):
         del t
 
     if progress:
+        progress(total, total, "decrypting client EDF files")
+    edf = export_edfs(server_root, repo, progress=progress, include=include)
+
+    if progress:
         progress(total, total, "copying config files")
     files, secrets = export_files(server_root, repo, progress=progress)
 
@@ -282,6 +303,7 @@ def create_repo(server_root, repo, progress=None, include=None):
         "skipped": {rel.replace("\\", "/"): why for rel, why in skipped},
         "files": files,
         "secrets": secrets,
+        "edf": edf,
     }
     os.makedirs(repo, exist_ok=True)
     write_manifest(repo, manifest)
@@ -296,6 +318,7 @@ def write_repo_meta(repo, server_root, manifest, n_dats=None):
     skipped = manifest.get("skipped", {})
     files = manifest.get("files", {})
     secrets = manifest.get("secrets", {})
+    edf = manifest.get("edf", {})
     if n_dats is None:
         n_dats = len(tables) + len(skipped)
     coverage = (
@@ -306,6 +329,16 @@ def write_repo_meta(repo, server_root, manifest, n_dats=None):
         "They are not converted -- they are already text -- so editing one in "
         "the repo and building copies exactly those bytes back to the server."
         % (len(tables), n_dats, len(skipped), MANIFEST, len(files)))
+    if edf:
+        table_edf = sum(1 for entry in edf.values()
+                        if entry.get("mode") == "tables")
+        blob_edf = len(edf) - table_edf
+        coverage += (
+            "\n\n%d client `.edf` file(s) are decrypted on import and "
+            "re-encrypted with their original key on build. %d contain clean "
+            "table chains under `csv/`; %d unsupported payload(s) are "
+            "preserved byte-for-byte under `blob/`."
+            % (len(edf), table_edf, blob_edf))
     gitignore = GITIGNORE
     if secrets:
         coverage += (
@@ -377,6 +410,82 @@ def export_files(server_root, repo, exts=VERBATIM_EXTS, progress=None):
     return files, secrets
 
 
+def export_edfs(server_root, repo, progress=None, include=None):
+    """Decrypt all client EDFs, exporting table chains or opaque payloads."""
+    entries = {}
+    rels = find_edfs(server_root)
+    if include:
+        rels = [r for r in rels
+                if any(fnmatch.fnmatch(r.replace("\\", "/"), pat)
+                       for pat in include)]
+    for i, rel in enumerate(rels):
+        if progress:
+            progress(i, len(rels), rel)
+        src = os.path.join(server_root, rel)
+        payload, key = decrypt_file(src)
+        entry = {"key": key.hex().upper(), "sha": sha(src)}
+        try:
+            tables = parse_table_chain(payload, rel)
+            names = []
+            for number, table in enumerate(tables):
+                name = "%02d" % number
+                csv_path = os.path.join(repo, "csv", rel, name + ".csv")
+                schema_path = os.path.join(
+                    repo, "schemas", rel, name + ".json")
+                os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+                os.makedirs(os.path.dirname(schema_path), exist_ok=True)
+                table.export_csv(csv_path)
+                write_schema_json(
+                    table.schema, schema_path,
+                    dat_name=rel + "#" + str(number),
+                    source=table.schema_source,
+                    header_field_count=table.field_count)
+                names.append(name)
+            rebuilt = build_edf_payload(repo, rel,
+                                        {"mode": "tables", "tables": names})
+            if rebuilt != payload:
+                raise SchemaError("EDF CSVs do not rebuild to original bytes")
+            entry.update({"mode": "tables", "tables": names})
+        except (SchemaError, ValueError, OSError):
+            # Unsupported payloads are still editable as binary and still
+            # round-trip through the original per-file key.
+            blob_path = os.path.join(repo, "blob", rel + ".dat")
+            os.makedirs(os.path.dirname(blob_path), exist_ok=True)
+            with open(blob_path, "wb") as f:
+                f.write(payload)
+            entry.update({"mode": "blob"})
+        entries[rel.replace("\\", "/")] = entry
+    return entries
+
+
+def build_edf_payload(repo, rel, entry):
+    native = rel.replace("/", os.sep)
+    if entry.get("mode") == "blob":
+        with open(os.path.join(repo, "blob", native + ".dat"), "rb") as f:
+            return f.read()
+    if entry.get("mode") != "tables":
+        raise SchemaError("%s has unknown EDF mode %r"
+                          % (rel, entry.get("mode")))
+    tables = []
+    for name in entry.get("tables", []):
+        schema_path = os.path.join(repo, "schemas", native, name + ".json")
+        csv_path = os.path.join(repo, "csv", native, name + ".csv")
+        schema, doc = read_schema_json(schema_path)
+        tables.append(Table.from_csv(
+            csv_path, schema, field_count=doc.get("header_field_count")))
+    if not tables:
+        raise SchemaError("%s has no EDF tables in its manifest" % rel)
+    return build_table_chain(tables)
+
+
+def build_edf(repo, rel, entry):
+    try:
+        key = bytes.fromhex(entry["key"])
+    except (KeyError, ValueError) as e:
+        raise SchemaError("%s has an invalid EDF key: %s" % (rel, e))
+    return encrypt_edf(build_edf_payload(repo, rel, entry), key)
+
+
 # ------------------------------------------------------------------ status
 
 class Status(object):
@@ -384,7 +493,7 @@ class Status(object):
 
     SAME, CHANGED, GONE, ERROR = "same", "changed", "missing", "error"
 
-    TABLE, FILE = "table", "file"
+    TABLE, FILE, EDF = "table", "file", "edf"
 
     def __init__(self, rel, state, detail="", changed_records=None,
                  kind=TABLE):
@@ -455,6 +564,35 @@ def diff_repo(repo, server_root=None, progress=None):
         del t
 
     out.extend(diff_files(repo, server_root, manifest))
+    out.extend(diff_edfs(repo, server_root, manifest))
+    return out
+
+
+def diff_edfs(repo, server_root, manifest):
+    """Compare rebuildable client EDFs against their live encrypted files."""
+    out = []
+    for rel, entry in sorted(manifest.get("edf", {}).items()):
+        native = rel.replace("/", os.sep)
+        live_path = os.path.join(server_root, native)
+        if not os.path.exists(live_path):
+            out.append(Status(rel, Status.GONE, "not in the client",
+                              kind=Status.EDF))
+            continue
+        try:
+            rebuilt = build_edf(repo, rel, entry)
+            with open(live_path, "rb") as f:
+                live = f.read()
+            if rebuilt == live:
+                out.append(Status(rel, Status.SAME, kind=Status.EDF))
+            else:
+                detail = ("%d table(s) differ" % len(entry.get("tables", []))
+                          if entry.get("mode") == "tables"
+                          else "decrypted payload differs")
+                out.append(Status(rel, Status.CHANGED, detail,
+                                  kind=Status.EDF))
+        except (SchemaError, ValueError, OSError) as e:
+            out.append(Status(rel, Status.ERROR, str(e).split("\n")[0],
+                              kind=Status.EDF))
     return out
 
 
@@ -595,6 +733,11 @@ def build_to_server(repo, server_root=None, only=None, apply=False,
                 f.write(blob)
             manifest["files"][s.rel]["sha"] = sha_bytes(blob)
             manifest["files"][s.rel]["bytes"] = len(blob)
+        elif s.kind == Status.EDF:
+            blob = build_edf(repo, s.rel, manifest["edf"][s.rel])
+            with open(live_path, "wb") as f:
+                f.write(blob)
+            manifest["edf"][s.rel]["sha"] = sha_bytes(blob)
         else:
             _t, blob = build_table(repo, native)
             with open(live_path, "wb") as f:
@@ -620,6 +763,12 @@ def cmd_create(args):
                                             progress=_bar)
     print("\n\ncreated %s" % os.path.abspath(args.repo))
     print("  %d table(s) converted" % len(tables))
+    edf = manifest.get("edf", {})
+    if edf:
+        print("  %d client EDF(s): %d table chain(s), %d opaque payload(s)"
+              % (len(edf),
+                 sum(e.get("mode") == "tables" for e in edf.values()),
+                 sum(e.get("mode") == "blob" for e in edf.values())))
     print("  %d skipped" % len(skipped))
     reasons = {}
     for rel, why in skipped:

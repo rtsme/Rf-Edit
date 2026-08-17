@@ -3,7 +3,8 @@ https://www.python.org/ftp/python/3.12.0/python-3.12.0-amd64.exe
 
 Then run start.bat
 
-Press open server and select your entire server folder.
+Press open server and select your entire server or client folder. Server
+`.dat` tables and OdinTeam client `.edf` containers are both supported.
 
 *Create Repo -- Only to make a new repo out of what is currently in the server. You dont need this probably*
 
@@ -31,3 +32,7 @@ python verify_all.py [folder]
 ```
 
 `build` without `--confirm` only lists what would change.
+
+Client EDF files are decrypted on import and re-encrypted with their original
+per-file key on build. EDF payloads that are clean table chains are exported as
+CSV; unknown payload layouts are preserved byte-for-byte under `blob/`.
