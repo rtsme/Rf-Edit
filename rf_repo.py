@@ -30,11 +30,27 @@ import re
 import shutil
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from rf_dat import (SchemaError, Table, read_schema_json, record_size,
                     write_schema_json)
 
 MANIFEST = "rfrepo.json"
+
+# Local, gitignored cache of {abspath: [size, mtime_ns, sha256]} so status/
+# build can skip re-reading a table's CSV or .dat when neither has changed
+# since the sha was last computed (BACKLOG #27: diffing 3700+ tables by
+# reading every one of them, every call, is the dominant cost). Content can't
+# change without size or mtime changing too, so this is the same trust git
+# places in its own stat cache -- not a correctness guarantee on its own, but
+# the manifest sha comparison right after still decides SAME/CHANGED, so a
+# wrongly-trusted stale entry only costs a re-read next run, never a wrong
+# status.
+STAT_CACHE_FILE = ".rf_repo_cache.json"
+
+# I/O-bound and independent per table, so overlap the waits instead of
+# hashing one file at a time -- see BACKLOG #27's profiling writeup.
+HASH_WORKERS = 16
 
 # Files copied into the repo byte-for-byte instead of being converted. They're
 # already text; there is nothing to gain from parsing them and something to
@@ -58,7 +74,11 @@ GITIGNORE = """\
 build/
 backups/
 *.bak
-"""
+
+# Local stat cache speeding up status/build (BACKLOG #27) -- machine-specific
+# paths and mtimes, rebuilt automatically, never a source of truth.
+%s
+""" % STAT_CACHE_FILE
 
 GITATTRIBUTES = """\
 # Everything here is ASCII with LF endings and must stay that way: these tables
@@ -184,6 +204,38 @@ def sha(path):
 
 def sha_bytes(blob):
     return hashlib.sha256(blob).hexdigest()
+
+
+def read_stat_cache(repo):
+    path = os.path.join(repo, STAT_CACHE_FILE)
+    try:
+        with open(path, "r", encoding="ascii") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def write_stat_cache(repo, cache):
+    with open(os.path.join(repo, STAT_CACHE_FILE), "w", encoding="ascii",
+              newline="\n") as f:
+        json.dump(cache, f)
+
+
+def cached_sha(path, cache):
+    """sha(path), skipping the read if size+mtime match the cached entry.
+
+    Raises the same OSError sha()/os.stat() would for a missing file --
+    callers that used to guard with os.path.exists() can catch that instead,
+    which also folds the existence check into the same stat() call.
+    """
+    st = os.stat(path)
+    key = os.path.abspath(path)
+    hit = cache.get(key)
+    if hit and hit[0] == st.st_size and hit[1] == st.st_mtime_ns:
+        return hit[2]
+    digest = sha(path)
+    cache[key] = [st.st_size, st.st_mtime_ns, digest]
+    return digest
 
 
 def rel_to_csv(rel):
@@ -419,23 +471,45 @@ def diff_repo(repo, server_root=None, progress=None):
     server_root = server_root or manifest["server_root"]
     rels = sorted(manifest["tables"])
     total = len(rels)
+
+    def table_paths(rel):
+        native = rel.replace("/", os.sep)
+        return (os.path.join(repo, "csv", rel_to_csv(native)),
+                os.path.join(server_root, native))
+
+    def hash_one(rel):
+        csv_path, dat_path = table_paths(rel)
+        try:
+            csv_sha = cached_sha(csv_path, cache)
+        except OSError:
+            return None, None
+        try:
+            dat_sha = cached_sha(dat_path, cache)
+        except OSError:
+            return csv_sha, None
+        return csv_sha, dat_sha
+
+    cache = read_stat_cache(repo)
+    with ThreadPoolExecutor(max_workers=HASH_WORKERS) as ex:
+        hashes = list(ex.map(hash_one, rels))
+    write_stat_cache(repo, cache)
+
     out = []
     for i, rel in enumerate(rels):
         if progress:
             progress(i, total, rel)
         entry = manifest["tables"][rel]
         native = rel.replace("/", os.sep)
-        csv_path = os.path.join(repo, "csv", rel_to_csv(native))
-        dat_path = os.path.join(server_root, native)
+        csv_path, dat_path = table_paths(rel)
+        csv_sha, dat_sha = hashes[i]
 
-        if not os.path.exists(csv_path):
+        if csv_sha is None:
             out.append(Status(rel, Status.ERROR, "csv is missing from the repo"))
             continue
-        if not os.path.exists(dat_path):
+        if dat_sha is None:
             out.append(Status(rel, Status.GONE, "not on the server"))
             continue
 
-        csv_sha, dat_sha = sha(csv_path), sha(dat_path)
         if csv_sha == entry.get("csv_sha") and dat_sha == entry.get("dat_sha"):
             out.append(Status(rel, Status.SAME))
             continue
