@@ -45,15 +45,21 @@ why those tables can be handed straight to `rf_dat.Table` and come out as CSV.
 The other 15 open (the container is the container) but do **not** parse as a
 chain. Their tables carry only a `<u32 record_count>` header, with the record
 layout compiled into the client rather than written in the file, and several
-mix in length-prefixed strings. `classify()` says which file is which and why,
-and `parse_table_chain` refuses rather than guessing -- a payload that is not
-a chain must stay an opaque blob until someone reads the client's reader for
-it, because a plausible-looking mis-parse would corrupt the file on write. See
-`docs/knowledge/edf-payload-tables.md` for the per-file evidence.
+mix in length-prefixed strings, so their records are not even all the same
+size. BACKLOG #46 added the second model those need -- a hand-derived
+**grammar** per file (`EDF_TABLE_GRAMMARS`), an ordered field list where a
+field may be fixed-width or variable-width. Two files have one so far,
+`NDLanguage.edf` and `NDStore.edf`.
+
+The remaining 13 stay opaque blobs until someone reads the client's reader for
+them: `classify()` says which file is which and why, and both parsers refuse
+rather than guessing, because a plausible-looking mis-parse would corrupt the
+file on write. See `docs/knowledge/edf-payload-tables.md` for the per-file
+evidence.
 
 Usage:
     python rf_edf.py <file.edf> ... --check          # decode+re-encode, diff vs original
-    python rf_edf.py <file.edf> ... --classify       # chain or not, and why
+    python rf_edf.py <file.edf> ... --classify       # chain, grammar or neither, and why
     python rf_edf.py <file.edf> ... --check-tables   # payload -> CSV -> payload, byte-exact
     python rf_edf.py <file.edf> --out payload.bin --key-out key.bin
     python rf_edf.py payload.bin --encode --key key.bin --out file.edf
@@ -65,15 +71,23 @@ Usage:
     from rf_edf import parse_table_chain, build_table_chain
         tables = parse_table_chain(payload, "Store.edf")
         assert build_table_chain(tables) == payload
+
+    from rf_edf import grammar_for, parse_var_tables, build_var_tables
+        tables = parse_var_tables(payload, grammar_for("NDStore.edf"), "NDStore.edf")
+        assert build_var_tables(tables) == payload
 """
 import argparse
+import csv
+import json
 import os
+import re
 import struct
 import sys
 import tempfile
 
-from rf_dat import (HEADER_SIZE, SchemaError, Table, decode, field_size,
-                    infer_schema, read_schema_json, verify_schema,
+from rf_dat import (HEADER_SIZE, SchemaError, Table, decode, encode,
+                    escape_text, field_size, infer_schema, parse_value,
+                    read_schema_json, unescape_text, verify_schema,
                     write_schema_json)
 
 MAGIC = b"RF Online by OdinTeam s(^O^)z"
@@ -337,17 +351,389 @@ def classify(payload, source="EDF payload"):
     except EdfError as exc:
         return None, str(exc)
 
+# --------------------------------------------------------------------------
+# the other payload: count-only tables with variable-length records
+# --------------------------------------------------------------------------
+#
+# 15 of the 32 files are not chains. Their tables carry a `<u32 record_count>`
+# and nothing else: the record layout is compiled into the client. Several
+# also carry length-prefixed strings, so records are not even the same size as
+# each other -- which is why `rf_dat`'s schema model does not reach them. It
+# describes a fixed-size record, and `record_size(schema)` is load-bearing all
+# the way down to `Table.to_bytes`.
+#
+# The model here is a **grammar** rather than a schema: an ordered field list
+# that every record in the table follows, where a field may be fixed-width or
+# variable-width. The field *list* is uniform even when the record *size* is
+# not, so one CSV column per field still works, and the CSV keeps the property
+# that matters -- one row per record, columns in record order.
+#
+# A grammar cannot be inferred. It is hand-derived per file from the payload
+# (and, where that is not enough, from the client's reader) and lives in
+# `EDF_TABLE_GRAMMARS` below. A file with no entry there stays an opaque blob:
+# guessing a layout that happens to consume every byte still writes back
+# corrupted records. See docs/knowledge/edf-payload-tables.md.
+
+COUNT_HEADER = "<I"
+COUNT_HEADER_SIZE = struct.calcsize(COUNT_HEADER)
+
+# `<u32 len><len bytes>`, the bytes being text with a trailing NUL inside the
+# count. The CSV holds the text without that terminator, and `write_field`
+# puts it back -- so the length is *derived*, never edited, and a row can be
+# retyped freely without anyone having to keep a byte count in step.
+#
+# Because the length is derived, the terminator is part of the contract rather
+# than an observation: `read_field` refuses a blob that is not exactly one
+# NUL-terminated string. A blob without one would encode back a byte longer,
+# and one with an interior NUL would come back short -- both silent
+# corruption. Refusing says the grammar is wrong for that file, which is the
+# true statement.
+LPSTR = "lpstrz"
+
+# A fixed N-byte NUL-padded field, kept apart from rf_dat's `string[N]`
+# deliberately. `string[N]` decodes to the first NUL and re-encodes NUL-padded,
+# which is right for the server's `.dat` fields and wrong here: NDStore record
+# 18's second name is `COIN EXCHANGE`, NULs, and then twenty bytes of
+# uninitialised stack the client never reads. `string[64]` would drop those on
+# the floor and the payload would not rebuild. `zstr[N]` treats only the
+# *trailing* NUL run as padding, so any N bytes survive the round trip, and a
+# field that is clean still reads as clean text in the CSV.
+_ZSTR_RE = re.compile(r"^zstr\[(\d+)\]$", re.IGNORECASE)
+
+
+def field_width(ftype):
+    """Bytes this field occupies, or None when that depends on its value."""
+    m = _ZSTR_RE.match(ftype)
+    if m:
+        return int(m.group(1))
+    if ftype == LPSTR:
+        return None
+    return field_size(ftype)
+
+
+def read_field(data, pos, ftype, where):
+    """Decode one field at `pos`, returning `(value, next position)`."""
+    m = _ZSTR_RE.match(ftype)
+    if m:
+        width = int(m.group(1))
+        if pos + width > len(data):
+            raise EdfError("%s: %d-byte field runs %d byte(s) past the end of "
+                           "the table"
+                           % (where, width, pos + width - len(data)))
+        return data[pos:pos + width].rstrip(b"\x00").decode("latin-1"), pos + width
+    if ftype == LPSTR:
+        if pos + 4 > len(data):
+            raise EdfError("%s: no room for the 4-byte length prefix" % where)
+        length = struct.unpack_from("<I", data, pos)[0]
+        pos += 4
+        if pos + length > len(data):
+            raise EdfError("%s: length prefix says %d bytes, %d past the end "
+                           "of the table"
+                           % (where, length, pos + length - len(data)))
+        blob = data[pos:pos + length]
+        if not blob.endswith(b"\x00") or b"\x00" in blob[:-1]:
+            raise EdfError(
+                "%s: the %d-byte string is not one NUL-terminated run (%r) -- "
+                "the grammar does not fit this file"
+                % (where, length, blob[:32]))
+        return blob[:-1].decode("latin-1"), pos + length
+    width = field_size(ftype)
+    if pos + width > len(data):
+        raise EdfError("%s: %s runs %d byte(s) past the end of the table"
+                       % (where, ftype, pos + width - len(data)))
+    return decode(data[pos:pos + width], ftype), pos + width
+
+
+def write_field(value, ftype):
+    """Encode one field. Exact inverse of `read_field` for anything it read."""
+    m = _ZSTR_RE.match(ftype)
+    if m:
+        width = int(m.group(1))
+        raw = str(value).encode("latin-1")
+        if len(raw) > width:
+            raise ValueError("too long: %d bytes, field holds %d"
+                             % (len(raw), width))
+        return raw + b"\x00" * (width - len(raw))
+    if ftype == LPSTR:
+        raw = str(value).encode("latin-1")
+        if b"\x00" in raw:
+            raise ValueError("must not contain a NUL byte -- the terminator "
+                             "is written for you")
+        return struct.pack("<I", len(raw) + 1) + raw + b"\x00"
+    return encode(value, ftype)
+
+
+def parse_field(text, ftype):
+    """Turn CSV text into a value `write_field` will accept, or raise."""
+    m = _ZSTR_RE.match(ftype)
+    if m or ftype == LPSTR:
+        try:
+            raw = text.encode("latin-1")
+        except UnicodeEncodeError:
+            raise ValueError("contains characters this file's encoding can't "
+                             "store (latin-1 only; paste plain text)")
+        if m and len(raw) > int(m.group(1)):
+            raise ValueError("too long: %d bytes, field holds %s"
+                             % (len(raw), m.group(1)))
+        if ftype == LPSTR and b"\x00" in raw:
+            raise ValueError("must not contain a NUL byte -- the terminator "
+                             "is written for you")
+        return text
+    return parse_value(text, ftype)
+
+
+def verify_grammar(grammar, source="grammar"):
+    """Reject a grammar that could not produce a usable CSV. Returns it."""
+    if not grammar:
+        raise EdfError("%s: a grammar needs at least one field" % source)
+    names = [n for n, _ in grammar]
+    if len(set(names)) != len(names):
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        raise EdfError("%s: duplicate field name(s) %s -- CSV columns must be "
+                       "distinct" % (source, ", ".join(dupes)))
+    for _name, ftype in grammar:
+        field_width(ftype)      # raises SchemaError on an unknown type
+    return grammar
+
+
+# Hand-derived grammars, keyed by lowercase file name. Everything absent here
+# is still unhandled and still reported as such -- see the per-file blocker
+# table in docs/knowledge/edf-payload-tables.md. Each value is the list of
+# tables in the payload, in order, one grammar each.
+EDF_TABLE_GRAMMARS = {
+    # <u32 6360> then 6360 x (<u32 id><u32 len><len bytes>). Ids run 0..6359
+    # in order; every string is NUL-terminated inside its length.
+    "ndlanguage.edf": [
+        [("Id", "dword"), ("Text", LPSTR)],
+    ],
+    # <u32 278> then 278 x (<u32 id><64-byte name><64-byte name><u32 len>
+    # <len bytes>). The 278 matches Store.edf's single table, which is the
+    # cross-check that the reading is right. The two names are identical in
+    # 272 of the 278 records and their separate roles are not known, so they
+    # are numbered rather than guessed at.
+    "ndstore.edf": [
+        [("Id", "dword"), ("Name1", "zstr[64]"), ("Name2", "zstr[64]"),
+         ("Text", LPSTR)],
+    ],
+}
+
+
+def grammar_for(source):
+    """The table grammars for a file name, or None if it has none."""
+    return EDF_TABLE_GRAMMARS.get(os.path.basename(source).lower())
+
+
+class VarTable(object):
+    """One count-only table: a grammar, and one row per record.
+
+    Deliberately not an `rf_dat.Table` subclass. Everything Table does is
+    anchored on a fixed `rec_size` -- the header it writes, the layout it
+    verifies, the field count it checks -- and none of that is true here.
+    Sharing the class would mean teaching those checks to be optional, on the
+    settled path all 17 chain files depend on.
+    """
+
+    def __init__(self, grammar, rows, source=None, grammar_source=None):
+        self.grammar = verify_grammar(grammar, source or "grammar")
+        self.rows = rows
+        self.source = source
+        self.grammar_source = grammar_source
+
+    @classmethod
+    def parse(cls, data, offset, grammar, source):
+        """Read `<u32 count>` and its records at `offset`.
+
+        Returns the table and the offset just past it.
+        """
+        verify_grammar(grammar, source)
+        if offset + COUNT_HEADER_SIZE > len(data):
+            raise EdfError("%s: %d byte(s) left, too few for a 4-byte record "
+                           "count" % (source, len(data) - offset))
+        count = struct.unpack_from(COUNT_HEADER, data, offset)[0]
+        pos = offset + COUNT_HEADER_SIZE
+        if count > MAX_RECORD_COUNT:
+            raise EdfError("%s: reads as %d records, which is not a record "
+                           "count" % (source, count))
+        rows = []
+        for i in range(count):
+            row = {}
+            for name, ftype in grammar:
+                row[name], pos = read_field(
+                    data, pos, ftype,
+                    "%s record %d field %s" % (source, i, name))
+            rows.append(row)
+        return cls(grammar, rows, source=source,
+                   grammar_source="hand-derived (EDF_TABLE_GRAMMARS)"), pos
+
+    def to_bytes(self):
+        out = bytearray(struct.pack(COUNT_HEADER, len(self.rows)))
+        for i, row in enumerate(self.rows):
+            for name, ftype in self.grammar:
+                try:
+                    out += write_field(row[name], ftype)
+                except ValueError as exc:
+                    raise EdfError("%s record %d field %s: %s"
+                                   % (self.source or "table", i, name, exc))
+        return bytes(out)
+
+    @classmethod
+    def from_csv(cls, csv_path, grammar):
+        t = cls(grammar, [], source=os.path.basename(csv_path),
+                grammar_source=os.path.basename(csv_path))
+        t.import_csv(csv_path)
+        return t
+
+    def export_csv(self, path):
+        """One line per record, ASCII-only, LF endings -- as rf_dat.Table."""
+        names = [n for n, _ in self.grammar]
+        with open(path, "w", newline="", encoding="ascii") as f:
+            w = csv.writer(f, lineterminator="\n")
+            w.writerow(names)
+            for row in self.rows:
+                w.writerow([escape_text(str(row[n])) for n in names])
+
+    def import_csv(self, path):
+        where = os.path.basename(path)
+        with open(path, "r", newline="", encoding="ascii") as f:
+            reader = csv.reader(f)
+            try:
+                header = next(reader)
+            except StopIteration:
+                raise ValueError("%s is empty" % where)
+            expected = [n for n, _ in self.grammar]
+            if header != expected:
+                raise ValueError(
+                    "%s: columns don't match the grammar.\nexpected %d columns "
+                    "starting %s\ngot %d columns starting %s\nColumns must not "
+                    "be added, removed or reordered -- they are the record "
+                    "layout." % (where, len(expected), expected[:4],
+                                 len(header), header[:4]))
+            rows = []
+            for i, rec in enumerate(reader):
+                if len(rec) != len(expected):
+                    raise ValueError("%s line %d: has %d values, expected %d"
+                                     % (where, i + 2, len(rec), len(expected)))
+                row = {}
+                for (name, ftype), text in zip(self.grammar, rec):
+                    try:
+                        row[name] = parse_field(unescape_text(text), ftype)
+                    except ValueError as exc:
+                        raise ValueError("%s line %d, column %s: %s"
+                                         % (where, i + 2, name, exc))
+                rows.append(row)
+        self.rows = rows
+        return rows
+
+
+def parse_var_tables(payload, grammars, source="EDF payload"):
+    """Parse a count-only payload into `VarTable`s, consuming every byte.
+
+    The closure test is the chain's: the walk has to land exactly on the last
+    byte. A grammar that stops early has read a count or a length at the wrong
+    offset, and everything after it is wrong too.
+    """
+    tables = []
+    offset = 0
+    for i, grammar in enumerate(grammars):
+        table, offset = VarTable.parse(
+            payload, offset, grammar, "%s#%d" % (source, i))
+        tables.append(table)
+    if offset != len(payload):
+        raise EdfError(
+            "%s: the grammar consumed %d of %d payload bytes, leaving %d -- a "
+            "grammar that does not close on the last byte was read at the "
+            "wrong offset"
+            % (source, offset, len(payload), len(payload) - offset))
+    return tables
+
+
+def build_var_tables(tables):
+    """Rebuild a count-only payload from `VarTable`s."""
+    out = bytearray()
+    for table in tables:
+        out += table.to_bytes()
+    return bytes(out)
+
+
+def write_grammar_json(grammar, path, table_name="", source=""):
+    """Freeze a grammar beside its CSV, as write_schema_json does a schema.
+
+    `fixed_bytes` and `variable_fields` are redundant with the field list on
+    purpose: a hand-edit that breaks the layout is caught on read rather than
+    rebuilding a plausible-looking wrong payload.
+    """
+    widths = [field_width(t) for _, t in grammar]
+    doc = {
+        "table": table_name,
+        "grammar_source": source,
+        "field_count": len(grammar),
+        "fixed_bytes": sum(w for w in widths if w is not None),
+        "variable_fields": sum(1 for w in widths if w is None),
+        "fields": [{"name": n, "type": t} for n, t in grammar],
+    }
+    with open(path, "w", encoding="ascii", newline="\n") as f:
+        json.dump(doc, f, indent=1)
+        f.write("\n")
+
+
+def read_grammar_json(path):
+    with open(path, "r", encoding="ascii") as f:
+        doc = json.load(f)
+    grammar = [(fld["name"], fld["type"]) for fld in doc["fields"]]
+    verify_grammar(grammar, os.path.basename(path))
+    widths = [field_width(t) for _, t in grammar]
+    fixed = sum(w for w in widths if w is not None)
+    variable = sum(1 for w in widths if w is None)
+    if (len(grammar) != doc["field_count"] or fixed != doc["fixed_bytes"]
+            or variable != doc["variable_fields"]):
+        raise EdfError(
+            "%s is inconsistent: the fields list gives %d fields / %d fixed "
+            "bytes / %d variable, the header says %d / %d / %d"
+            % (os.path.basename(path), len(grammar), fixed, variable,
+               doc["field_count"], doc["fixed_bytes"], doc["variable_fields"]))
+    return grammar, doc
+
+def _csv_round_trip(tables, name, tmp):
+    """Write every table out as CSV + frozen layout, read it back, rebuild.
+
+    Both payload models come through here, and each one freezes the layout its
+    own reader needs -- a schema for a chain table, a grammar for a
+    variable-record one.
+    """
+    rebuilt = []
+    for i, table in enumerate(tables):
+        csv_path = os.path.join(tmp, "%02d.csv" % i)
+        layout_path = os.path.join(tmp, "%02d.json" % i)
+        table.export_csv(csv_path)
+        if isinstance(table, VarTable):
+            write_grammar_json(table.grammar, layout_path,
+                               table_name="%s#%d" % (name, i),
+                               source=table.grammar_source)
+            grammar, _doc = read_grammar_json(layout_path)
+            rebuilt.append(VarTable.from_csv(csv_path, grammar))
+        else:
+            write_schema_json(table.schema, layout_path,
+                              dat_name="%s#%d" % (name, i),
+                              source=table.schema_source,
+                              header_field_count=table.field_count)
+            schema, doc = read_schema_json(layout_path)
+            rebuilt.append(Table.from_csv(
+                csv_path, schema, field_count=doc.get("header_field_count")))
+    if isinstance(tables[0], VarTable):
+        return build_var_tables(rebuilt)
+    return build_table_chain(rebuilt)
+
 
 def _check_tables(paths):
-    """payload -> tables -> CSV+schema -> tables -> payload, diffed byte for byte.
+    """payload -> tables -> CSV+layout -> tables -> payload, diffed byte for byte.
 
-    The CSV hop is the point. Parsing a payload proves only that the numbers
+    The CSV hop is the point. Parsing a payload proves only that the bytes
     fit; writing the rows out as text, reading them back through the frozen
-    schema, and reproducing the payload to the byte is what makes a chain file
-    safe to *edit*. Files that are not chains are reported as unhandled, never
-    silently accepted.
+    layout, and reproducing the payload to the byte is what makes a file safe
+    to *edit*. Files with neither a chain nor a grammar are reported as
+    unhandled, never silently accepted.
     """
-    checked = failed = skipped = 0
+    chains = grammars = failed = skipped = 0
     for path in paths:
         name = os.path.basename(path)
         try:
@@ -356,38 +742,40 @@ def _check_tables(paths):
             print("ERROR  %-28s %s" % (name, exc))
             failed += 1
             continue
+        grammar = grammar_for(name)
         try:
-            tables = parse_table_chain(payload, name)
+            if grammar is not None:
+                tables = parse_var_tables(payload, grammar, name)
+            else:
+                tables = parse_table_chain(payload, name)
         except SchemaError as exc:
-            print("SKIP   %-28s not a table chain: %s"
-                  % (name, str(exc).split(": ", 1)[-1]))
-            skipped += 1
+            if grammar is None:
+                print("SKIP   %-28s not a table chain: %s"
+                      % (name, str(exc).split(": ", 1)[-1]))
+                skipped += 1
+            else:
+                # A registered grammar that no longer fits is a failure, not a
+                # skip: something is wrong with the grammar or with the file,
+                # and either way it must not pass quietly.
+                print("FAIL   %-28s its grammar does not fit: %s"
+                      % (name, str(exc).split(": ", 1)[-1]))
+                failed += 1
             continue
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                rebuilt = []
-                for i, table in enumerate(tables):
-                    csv_path = os.path.join(tmp, "%02d.csv" % i)
-                    schema_path = os.path.join(tmp, "%02d.json" % i)
-                    table.export_csv(csv_path)
-                    write_schema_json(table.schema, schema_path,
-                                      dat_name="%s#%d" % (name, i),
-                                      source=table.schema_source,
-                                      header_field_count=table.field_count)
-                    schema, doc = read_schema_json(schema_path)
-                    rebuilt.append(Table.from_csv(
-                        csv_path, schema,
-                        field_count=doc.get("header_field_count")))
-                blob = build_table_chain(rebuilt)
+                blob = _csv_round_trip(tables, name, tmp)
         except (SchemaError, ValueError, OSError) as exc:
             print("FAIL   %-28s %s" % (name, exc))
             failed += 1
             continue
         if blob == payload:
-            print("OK     %-28s %8d bytes  %2d table(s), %d row(s)"
-                  % (name, len(payload), len(tables),
-                     sum(len(t.rows) for t in tables)))
-            checked += 1
+            print("OK     %-28s %-8s %8d bytes  %2d table(s), %d row(s)"
+                  % (name, "grammar" if grammar else "chain", len(payload),
+                     len(tables), sum(len(t.rows) for t in tables)))
+            if grammar:
+                grammars += 1
+            else:
+                chains += 1
         else:
             where = next((i for i in range(min(len(blob), len(payload)))
                           if blob[i] != payload[i]), min(len(blob), len(payload)))
@@ -395,8 +783,9 @@ def _check_tables(paths):
                   "difference at offset %d"
                   % (name, len(blob), len(payload), where))
             failed += 1
-    print("\n%d chain payload(s) round-trip byte-exact through CSV, "
-          "%d failed, %d not a chain" % (checked, failed, skipped))
+    print("\n%d payload(s) round-trip byte-exact through CSV (%d chain, "
+          "%d grammar), %d failed, %d unhandled"
+          % (chains + grammars, chains, grammars, failed, skipped))
     return 1 if failed else 0
 
 
@@ -431,26 +820,39 @@ def main(argv=None):
         return 0
 
     if args.classify:
-        chains = 0
+        chains = grammars = 0
         for path in args.file:
+            name = os.path.basename(path)
             try:
                 payload, _key = decrypt_file(path)
             except EdfError as exc:
-                print("ERROR  %-28s %s" % (os.path.basename(path), exc))
+                print("ERROR  %-28s %s" % (name, exc))
                 continue
-            layout, why = classify(payload, os.path.basename(path))
+            grammar = grammar_for(name)
+            if grammar is not None:
+                try:
+                    tables = parse_var_tables(payload, grammar, name)
+                except SchemaError as exc:
+                    print("BROKEN %-28s %8d bytes  its grammar does not fit: %s"
+                          % (name, len(payload), str(exc).split(": ", 1)[-1]))
+                    continue
+                grammars += 1
+                print("GRAMMR %-28s %8d bytes  %2d table(s)  %s"
+                      % (name, len(payload), len(tables),
+                         ", ".join("%d rec" % len(t.rows) for t in tables)))
+                continue
+            layout, why = classify(payload, name)
             if layout:
                 chains += 1
                 print("CHAIN  %-28s %8d bytes  %2d table(s)  %s"
-                      % (os.path.basename(path), len(payload), len(layout),
+                      % (name, len(payload), len(layout),
                          ", ".join("%dx%d" % (c, r) for c, r in layout[:6])
                          + (", ..." if len(layout) > 6 else "")))
             else:
                 print("OTHER  %-28s %8d bytes  %s"
-                      % (os.path.basename(path), len(payload),
-                         why.split(": ", 1)[-1]))
-        print("\n%d/%d payload(s) are table chains"
-              % (chains, len(args.file)))
+                      % (name, len(payload), why.split(": ", 1)[-1]))
+        print("\n%d/%d payload(s) are table chains, %d have a hand-derived "
+              "grammar" % (chains, len(args.file), grammars))
         return 0
 
     if args.check_tables:
