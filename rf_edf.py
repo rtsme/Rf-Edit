@@ -817,6 +817,63 @@ EDF_TABLE_GRAMMARS = {
                   ("ColorB", "ubyte"), ("ColorA", "ubyte"),
                   ("Unknown4", "dword"), ("Text", WPSTR)]),
     ] * 55,
+    # BACKLOG #52. Two parallel runs of 45 count-only tables -- 45 tables of
+    # fixed 64-byte item names, then 45 tables of the matching descriptions --
+    # and one last table of 100 mission entries. The walk closes exactly on
+    # the last of 8 130 085 payload bytes.
+    #
+    # **What makes the two runs a derivation and not a guess is that they are
+    # the same length.** Nothing in the file says 45; it is what the walk
+    # arrives at from offset 0 twice over, independently, reading two
+    # different record shapes. A boundary wrong anywhere in the first run
+    # would land the second run's first table on bytes that are not a count,
+    # and 45 = 45 would not survive it. The two runs are also the same
+    # categories in the same order: name table 12 is the eight tool kits
+    # (`Weapon/Shield Tool Kit`, `Armor Tool Kit`, ...) and description table
+    # 11 is those same eight, described. The runs are offset by one because
+    # the first name table -- 80 character faces -- has no descriptions, and
+    # correspondingly the description run ends with two empty tables where the
+    # name run ends with one.
+    #
+    # A name table is `<u32 count>` then `count` x 64 NUL-padded bytes, and a
+    # description table `<u32 count>` then `count` x (`<u32 id><u32 0>
+    # <u32 len><len bytes>`) with `id` running 0..count-1 -- the same
+    # self-checking index NDLanguage.edf has, holding for all 45 tables. The
+    # zero dword between the id and the string is numbered, not named: it is
+    # zero in every record of every table, which is exactly as consistent
+    # with padding as with a field nothing in this file ever sets.
+    "nditem.edf": (
+        [[("Name", "zstr[64]")]] * 45
+        + [[("Id", "dword"), ("Unknown1", "dword"), ("Text", LPSTR)]] * 45
+        # The 91st table: `<u32 100>` then 100 x (`<u32 index><zstr[4] code>`,
+        # 60 fixed bytes, `<u32 len><len bytes>`). `index` runs 0..99 and
+        # `code` runs `a1`..`a100`, so each record start is pinned twice over
+        # by the file itself; within a record the split is forced too, since
+        # exactly one offset in each of the 100 records has a length prefix
+        # that reaches the next record start, and all 100 agree on 60.
+        #
+        # That 60 is **fixed**, which is the point the earlier note in
+        # docs/knowledge/edf-payload-tables.md got wrong: it read the region
+        # as a variable-length list, and it does not vary. So the 15 dwords
+        # need no new field kind -- they are ordinary fixed fields.
+        #
+        # They are numbered rather than named because their roles cannot be
+        # pinned from this file. Eight of the fifteen carry values and the
+        # seven between them are zero; four of the eight are a run of
+        # consecutive text ids, which across the table climb strictly from
+        # 1853 to 2500. But *which* four alternates with the record's parity
+        # -- even records carry the ids in `Unknown1/3/5/7`, odd records in
+        # `Unknown2/4/6/8`, an ABAB run unbroken across all 100. Until
+        # something explains that alternation, naming a slot would be
+        # asserting a role the file contradicts every other record. Record 28
+        # is the one exception to every pattern here, carrying uninitialised
+        # bytes in slots that are zero in the other 99 -- the same kind of
+        # client-side junk as Hint.edf's 0xCDCD, and harmless: fixed bytes
+        # round-trip whatever they hold.
+        + [[("Id", "dword"), ("Code", "zstr[4]")]
+           + [("Unknown%d" % i, "dword") for i in range(1, 16)]
+           + [("Text", LPSTR)]]
+    ),
 }
 
 

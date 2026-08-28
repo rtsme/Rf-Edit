@@ -19,7 +19,8 @@ import unittest
 from rf_dat import SchemaError, Table, infer_schema
 from rf_edf import (CHAIN_HEADER, DAT_HEADER, EDF_MIN_TEXT_SHARE,
                     EDF_STRING_WIDTHS, EDF_TABLE_GRAMMARS, KEY_LENGTH, MAGIC,
-                    MAX_WPSTR, WPSTR, BlockGrammar, BlockTable, EdfError,
+                    LPSTR, MAX_WPSTR, WPSTR, BlockGrammar, BlockTable,
+                    EdfError,
                     VarTable, build_dat_tables, build_table_chain,
                     build_var_tables, chain_layout, classify, dat_layout,
                     decrypt, encrypt, grammar_for, parse_dat_tables,
@@ -406,13 +407,65 @@ class VariableRecordTests(unittest.TestCase):
         self.assertIsNotNone(grammar_for(r"DataTable\en-ph\NDStore.edf"))
         self.assertIsNotNone(grammar_for("Hint.edf"))
         self.assertIsNotNone(grammar_for("UIHelp.edf"))
+        self.assertIsNotNone(grammar_for("NDItem.edf"))
         # Everything else is still an opaque blob, and must stay one until
         # its grammar is derived rather than guessed.
         self.assertIsNone(grammar_for("Item.edf"))
-        self.assertIsNone(grammar_for("NDItem.edf"))
+        self.assertIsNone(grammar_for("NDMap.edf"))
         for name, grammars in EDF_TABLE_GRAMMARS.items():
             for grammar in grammars:
                 verify_grammar(grammar, name)
+
+    def test_nditem_grammar_is_two_runs_of_equal_length(self):
+        """The 45 = 45 symmetry is what makes NDItem.edf's walk a derivation.
+
+        Nothing in that file states 45; it is what the walk reaches twice,
+        independently, reading two different record shapes. If a future edit
+        changed one run's length without the other's, the reading would no
+        longer be cross-checked by anything -- so the shape is asserted here
+        rather than left to the round-trip alone.
+        """
+        grammars = EDF_TABLE_GRAMMARS["nditem.edf"]
+        self.assertEqual(len(grammars), 91)
+        names = [g for g in grammars if g == [("Name", "zstr[64]")]]
+        descs = [g for g in grammars
+                 if g == [("Id", "dword"), ("Unknown1", "dword"),
+                          ("Text", LPSTR)]]
+        self.assertEqual(len(names), 45)
+        self.assertEqual(len(descs), 45)
+        self.assertEqual(grammars[:45], names)      # the runs are contiguous
+        self.assertEqual(grammars[45:90], descs)    # and in this order
+        # The 91st table's 60 fixed bytes are 15 dwords -- the point the
+        # earlier reading got wrong by taking them for a variable-length list.
+        tail = grammars[90]
+        self.assertEqual(sum(1 for _, t in tail if t == "dword"), 16)
+        self.assertEqual(tail[1], ("Code", "zstr[4]"))
+        self.assertEqual(tail[-1], ("Text", LPSTR))
+
+    def test_nditem_tail_record_round_trips(self):
+        """One record of the 91st table, built by hand and read back."""
+        grammar = EDF_TABLE_GRAMMARS["nditem.edf"][90]
+        text = b"Defeat Splinter Rex" + bytes(1)
+        payload = (struct.pack("<I", 1)
+                   + struct.pack("<i", 0) + b"a1" + bytes(2)
+                   + struct.pack("<15I", *range(15))
+                   + struct.pack("<I", len(text)) + text)
+        tables = parse_var_tables(payload, [grammar], "NDItem.edf")
+        row = tables[0].rows[0]
+        self.assertEqual(row["Code"], "a1")
+        self.assertEqual(row["Text"], "Defeat Splinter Rex")
+        self.assertEqual(row["Unknown15"], 14)
+        self.assertEqual(build_var_tables(tables), payload)
+
+    def test_nditem_tail_rejects_a_code_that_is_too_long(self):
+        """`a100` fills the 4-byte code exactly; a fifth byte must not fit."""
+        grammar = EDF_TABLE_GRAMMARS["nditem.edf"][90]
+        table = VarTable(grammar, [dict(
+            [("Id", 0), ("Code", "a1000"), ("Text", "x")]
+            + [("Unknown%d" % i, 0) for i in range(1, 16)])],
+            source="NDItem.edf")
+        with self.assertRaises(EdfError):
+            table.to_bytes()
 
     def test_language_grammar_round_trips(self):
         payload = struct.pack("<I", 3)
