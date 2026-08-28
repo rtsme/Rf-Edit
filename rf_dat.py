@@ -378,7 +378,8 @@ def auto_schema(field_count, rec_size):
     return schema
 
 
-def _looks_like_string_slot(records, pos, width, ascii_only=False):
+def _looks_like_string_slot(records, pos, width, ascii_only=False,
+                            min_text_share=0.0):
     """True if [pos, pos+width) behaves like a null-padded string in every record.
 
     That means: printable-or-high bytes up to the first NUL, then nothing but
@@ -403,12 +404,23 @@ def _looks_like_string_slot(records, pos, width, ascii_only=False):
     terminator -- passes the relaxed test in every record. Requiring plain
     printable ASCII is the difference between finding item codes and labelling
     every empty slot in the file as text.
+
+    `min_text_share` additionally requires that at least this fraction of
+    records actually contain text, not just one (BACKLOG #50). A 16- or
+    32-byte name slot in the client's tables routinely has one real name
+    among hundreds of all-fill records: "at least one" is enough to call it a
+    string, but most of its *values* are still fill and land in the junk
+    bucket at read time. Rejecting the width when real text is this rare
+    leaves the slot as numbers instead, which is not junk by that same
+    measure -- see docs/knowledge/edf-payload-tables.md for the tuning.
     """
     saw_text = False
+    text_count = total = 0
     for rec in records:
         slot = rec[pos:pos + width]
         if len(slot) < width:
             return False
+        total += 1
         if len(set(slot)) == 1 and slot[0] >= 0x80:
             continue                          # fill run: not text, not disqualifying
         head, _sep, tail = slot.partition(b"\x00")
@@ -420,7 +432,10 @@ def _looks_like_string_slot(records, pos, width, ascii_only=False):
             return False                      # high bytes: a sentinel, not a code
         if head:
             saw_text = True
-    return saw_text
+            text_count += 1
+    if not saw_text:
+        return False
+    return total == 0 or text_count / total >= min_text_share
 
 
 # Below this width a slot carries too little evidence to be called text on the
@@ -429,7 +444,7 @@ NARROW_STRING_WIDTH = 8
 
 
 def infer_schema(records, rec_size, width=64, string_widths=None,
-                 allow_short_numbers=False):
+                 allow_short_numbers=False, min_text_share=0.0):
     """Work out a layout from the record bytes themselves.
 
     For the thousands of per-map tables there is no reference schema anywhere,
@@ -461,6 +476,13 @@ def infer_schema(records, rec_size, width=64, string_widths=None,
     `allow_short_numbers` lets a record end in a 2- or 1-byte number. Client
     record sizes are not all multiples of four (`Character.edf`'s fifth table
     is 46 bytes), and without this such a table cannot be laid out at all.
+
+    `min_text_share` requires a candidate width to have real text in at least
+    this fraction of records, not just one (BACKLOG #50). Without it, adding
+    16/32 to `string_widths` reads a slot as a string the moment a single
+    record out of hundreds has a name in it -- correct for that one record,
+    but every other (all-fill) record's value then counts as junk. See
+    `docs/knowledge/edf-payload-tables.md` for the measurement that set it.
     """
     fields = [("Index", "dword")]
     pos = 4
@@ -470,7 +492,8 @@ def infer_schema(records, rec_size, width=64, string_widths=None,
         slot = next((w for w in widths
                      if pos + w <= rec_size
                      and _looks_like_string_slot(
-                         records, pos, w, ascii_only=w < NARROW_STRING_WIDTH)),
+                         records, pos, w, ascii_only=w < NARROW_STRING_WIDTH,
+                         min_text_share=min_text_share)),
                     None)
         if slot is not None:
             nstr += 1

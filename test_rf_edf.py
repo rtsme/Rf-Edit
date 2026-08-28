@@ -14,9 +14,10 @@ import struct
 import unittest
 
 from rf_dat import SchemaError, Table, infer_schema
-from rf_edf import (CHAIN_HEADER, EDF_STRING_WIDTHS, KEY_LENGTH, MAGIC,
-                    EdfError, build_table_chain, chain_layout, classify,
-                    decrypt, encrypt, parse_table_chain)
+from rf_edf import (CHAIN_HEADER, EDF_MIN_TEXT_SHARE, EDF_STRING_WIDTHS,
+                    KEY_LENGTH, MAGIC, EdfError, build_table_chain,
+                    chain_layout, classify, decrypt, encrypt,
+                    parse_table_chain)
 
 
 class ContainerTests(unittest.TestCase):
@@ -105,7 +106,8 @@ class NarrowStringTests(unittest.TestCase):
     def _schema(self, records, rec_size):
         return infer_schema(records, rec_size,
                             string_widths=EDF_STRING_WIDTHS,
-                            allow_short_numbers=True)
+                            allow_short_numbers=True,
+                            min_text_share=EDF_MIN_TEXT_SHARE)
 
     def test_ascii_code_is_a_string(self):
         records = [b"\x00\x00\x00\x00BWB0", b"\x01\x00\x00\x00BWF1"]
@@ -156,6 +158,33 @@ class NarrowStringTests(unittest.TestCase):
                    b"\x01\x00\x00\x00" + b"ITEM0001"]
         self.assertEqual(infer_schema(records, 12, width=8),
                          [("Index", "dword"), ("Code", "string[8]")])
+
+    def test_mostly_fill_wide_slot_is_rejected_below_the_share(self):
+        # BACKLOG #50: "at least one text record" (min_text_share=0.0, the
+        # default) is enough for a 32-byte name slot to read as a string even
+        # when almost every record in it is the empty-slot fill run -- most
+        # of its *values* are then junk. Below EDF_STRING_WIDTHS's threshold
+        # the slot should fall back to numbers instead.
+        fill = bytes([0xFF] * 32)
+        records = ([b"\x00\x00\x00\x00" + b"WARRIOR".ljust(32, b"\x00")] +
+                   [struct.pack("<I", i) + fill for i in range(1, 9)])
+        schema = infer_schema(records, 36, string_widths=(32,),
+                              min_text_share=EDF_MIN_TEXT_SHARE)
+        self.assertNotIn("Code", [name for name, _ in schema])
+        self.assertEqual([ftype for _, ftype in schema],
+                         ["dword"] * 9)
+
+    def test_wide_name_slot_is_kept_above_the_share(self):
+        # The same shape, but with enough real names that the share clears
+        # the threshold -- this is Character.edf's WARRIOR/COMMANDO column.
+        fill = bytes([0xFF] * 32)
+        names = [b"WARRIOR", b"COMMANDO", b"RANGER", b"SPIRITUALIST"]
+        records = [struct.pack("<I", i) + n.ljust(32, b"\x00")
+                   for i, n in enumerate(names)]
+        records += [struct.pack("<I", i) + fill for i in range(4, 9)]
+        schema = infer_schema(records, 36, string_widths=(32,),
+                              min_text_share=EDF_MIN_TEXT_SHARE)
+        self.assertEqual(schema, [("Index", "dword"), ("Code", "string[32]")])
 
 
 if __name__ == "__main__":
