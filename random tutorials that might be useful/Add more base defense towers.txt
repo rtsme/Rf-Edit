@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_addmorebasedefensetowers.md — fidelity preserved from original]
+
 Open your server's zoneserver.exe using a hex editor.
 Search for the hex code: 0x1ED4F9 or 001ED4F9
 The result will be 32, which converted to decimal is 50 — this is the max number of towers the server accepts.
@@ -8,3 +10,4 @@ Now open the file:
 RF_BIN/Script/SystemGuardTower.ini
 
 And add more towers at the buggy locations, then save.
+

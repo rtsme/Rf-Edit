@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_movenpctoanothermap.md — fidelity preserved from original]
+
 Open the folder of the map you're removing the NPC from, example:
 Zoneserver/rf_bin/map/Sette/
 Open the file using Notepad++:
@@ -46,3 +48,4 @@ Now just paste storelist.dat and store.dat into the folder: zoneserver/rf_bin/sc
 And convert both files to edf and paste them into the client's DataTable folders.
 
 Just restart the server and you're done.
+

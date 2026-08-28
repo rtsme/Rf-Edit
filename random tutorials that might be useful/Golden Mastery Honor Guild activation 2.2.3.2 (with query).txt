@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_goldenmasteryhonorguildactivation2232withquery.md — fidelity preserved from original]
+
 --created by: Roslaw--
 --06-03-2013--
 
@@ -87,3 +89,4 @@ INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES
 INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@ar5, @a5, 5, 0)
 END
 GO
+

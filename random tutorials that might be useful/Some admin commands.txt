@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_someadmincommands.md — fidelity preserved from original]
+
 #################################################
 
 %neverdie 1
@@ -200,3 +202,4 @@ This command increases the duration of your buffs
 (code to enter the race leader list — use 1 through 9, example: %bossme 1)
 
 #################################################
+

@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changepremiumbannerimage.md — fidelity preserved from original]
+
 In the client file:
 
 SpriteImage/eng-gb/common.spr
@@ -13,3 +15,4 @@ SpriteImage/en-id
 SpriteImage/en-ph
 SpriteImage/pt-br
 SpriteImage/ru-ru
+

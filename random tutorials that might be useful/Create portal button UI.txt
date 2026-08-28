@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_createportalbuttonui.md — fidelity preserved from original]
+
 Open your dataTable's map.edf using 010 Editor.
 
 Find the map where you'll edit the button:
@@ -62,3 +64,4 @@ float [1]
 float [2]
 
 you leave as is — minimum stays minimum, maximum stays maximum. Understand? We only swap "float [0]" between minimum and maximum, and vice versa.
+

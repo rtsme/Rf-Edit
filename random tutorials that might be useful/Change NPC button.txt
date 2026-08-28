@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changenpcbutton.md — fidelity preserved from original]
+
 Open the file
 
 NDstore.strs and NDstore.dat.
@@ -28,3 +30,4 @@ Example: put the item's code in the column
 Note: in the columns (strlitemlist) and (strlitemCode) you need to use the same matching item code.
 Example, the columns
 (1*strlitemlist) and (1*strlitemCode) need to have the same item code you want to put a sale limit on.
+

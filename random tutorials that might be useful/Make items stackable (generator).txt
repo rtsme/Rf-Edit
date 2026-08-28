@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_makeitemsstackablegenerator.md — fidelity preserved from original]
+
 Just open the TimerItem.xlsx file.
 
 Go to the ItemTimer tab, which is the client side.
@@ -9,3 +11,4 @@ But only do this on the client side, because the server side will still keep its
 Don't touch the server-side TimerItem.txt, since it controls whether it expires and its duration.
 
 Generate itemtimer.dat, convert it to edf, and replace it in the client's DataTable.
+

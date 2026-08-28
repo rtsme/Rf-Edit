@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_createsafezonearea.md — fidelity preserved from original]
+
 Go to the folder rf_bin/map/sette/
 
 Copy the file setteext.spt to the folder of the map that will have the safe zone.
@@ -26,3 +28,4 @@ Rename the map, for example to HQ Bell, and it becomes:
 *NeutralB_dummy01 -100 -100 -100 100 100 100
 
 These numbers, 100, are the size of the safe zone.
+

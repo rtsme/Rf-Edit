@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changechipaura.md — fidelity preserved from original]
+
 Open the files using a hex editor:
 
 Cliente/chef/eff/crystal/crystalon.eff
@@ -72,3 +74,4 @@ Change it too, to the new code:
 
 This means crystalon.eff and crystalchip.eff will now point to code 37 00 in hex, which corresponds to line 1079 in particle.ini.
 And your particle.ini on line 1079 has the new aura located in the chef/war folder. Done.
+

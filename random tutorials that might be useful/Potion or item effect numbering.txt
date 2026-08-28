@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_potionoritemeffectnumbering.md — fidelity preserved from original]
+
 Code:
 enum ResEff{
     None=-1,
@@ -175,3 +177,4 @@ enum PotEff
     RacePt=63,
     AllPt=64
 }
+

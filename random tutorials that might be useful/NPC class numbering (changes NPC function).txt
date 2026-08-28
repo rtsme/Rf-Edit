@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_npcclassnumberingchangesnpcfunction.md — fidelity preserved from original]
+
 1 = Buy / Sell
 2 = Reference
 3 = (-) Validate economic indicator
@@ -151,3 +153,4 @@
 151 = (-) Increase your rank
 
 Note: this list originally used machine-translated English labels for many of the "Exchange" entries (a Portuguese-to-English pass done by the original author) — some race/weapon abbreviations (BW, BR, BF, KV, KR, CD, CP, CF, AB, AR, AF) refer to specific race/weapon-type NPC codes and are kept as-is since their exact meaning is server-specific.
+

@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_rfonlinemoneytypes.md — fidelity preserved from original]
+
 Dalant = 0,
 Gold = 1,
 PvpPoint = 2,
@@ -5,3 +7,4 @@ Unknown = 3,
 ProcessingPoint = 4,
 HuntingPoint = 5,
 GoldPoint = 6
+

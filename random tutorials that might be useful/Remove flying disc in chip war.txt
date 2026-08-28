@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_removeflyingdiscinchipwar.md — fidelity preserved from original]
+
 In the Entity.ini file, located in the client's Chef/ folder.
 
 Search for "chip" and remove the whole entry:
@@ -11,3 +13,4 @@ You can change the flying icon by changing the image at:
 
 ChefEntity1.rpk
 \Chef\Up\Cry_box\chip\chip.r3t
+

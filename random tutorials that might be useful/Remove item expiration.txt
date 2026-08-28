@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_removeitemexpiration.md — fidelity preserved from original]
+
 To make an item not expire.
 
 Open item.edf on the client side.
@@ -18,3 +20,4 @@ Minute = minutes
 Sec = seconds
 
 That's all you need.
+

@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_increasebonuspt.md — fidelity preserved from original]
+
 Increase the bonus PT gained when promoting a class at level 30.
 
 Open the client's character.edf file using Structorian.
@@ -43,3 +45,4 @@ If you set the "special skill PT" column to: 1000
 The BnsSMastery line also needs to be set to: 1000
 
 Now just save, close the server, put the new character file in the client's DataTable folder, put class.dat in the server's Script folder, and restart the server.
+

@@ -1,5 +1,8 @@
+﻿[Imported to docs/knowledge/tut_changewelcometorfworldmessage.md — fidelity preserved from original]
+
 The messages that appear when entering your character are here:
 
 Database RF_World
 
 table: dbo.tbl_GreetMsg
+

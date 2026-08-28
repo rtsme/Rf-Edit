@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changemoblevelunlockrange.md — fidelity preserved from original]
+
 Open the file: .
 
 Character file inside the client, using Structorian.
@@ -24,3 +26,4 @@ Put the same level you edited in the character file, now in the monstercharacter
 
 The level column is called:
 Float Level.
+

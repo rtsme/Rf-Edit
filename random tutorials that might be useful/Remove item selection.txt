@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_removeitemselection.md — fidelity preserved from original]
+
 To remove the item selection popup when changing class.
 Example:
 
@@ -14,3 +16,4 @@ It will have the number 1, meaning it's set to true (to select an item), so chan
 Since we want to receive all 3 items at once without choosing, just set SelectRewardItem to false in the server's class.dat, and set the Selection (0-all 1-Choice) column to 0 in the client's character.edf class table.
 
 When changing class, the item-selection popup won't appear and you'll receive all of them.
+

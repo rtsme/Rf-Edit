@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_edititemquantityincombination.md — fidelity preserved from original]
+
 To edit combinations at the Hero NPC, open the files: CombineTable.dat and CombineTable2.dat
 Located in the server's script folder.
 
@@ -63,3 +65,4 @@ CombineTable.dat and CombineTable2.dat and LinkedStuff.dat
 Inside that folder and open the program, go to option 9, and it will generate a folder with a client file inside it.
 
 This generated file will replace the file in the client's dataTable folder.
+

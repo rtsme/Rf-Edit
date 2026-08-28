@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changemobrespawntime.md — fidelity preserved from original]
+
 Open the folder of the map where the mob is located.
 Example: let's edit Flyn.
 So we go to the folder:
@@ -80,3 +82,4 @@ with a code next to it.
 Open the program:
 RF Online Codes by NiteMare and search for that code in the Monsters tab.
 The monster's name corresponding to that code will show up — if it's the one you wanted to edit, just save the edited file in 010 Editor, restart the server, and log in to check.
+

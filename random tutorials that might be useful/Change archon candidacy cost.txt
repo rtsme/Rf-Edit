@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changearchoncandidacycost.md — fidelity preserved from original]
+
 Open rfonline.bin using Strs with the Structorian program.
 
 In the menu [+] Cost Limit
@@ -5,3 +7,4 @@ In the menu [+] Cost Limit
 RegistArchon
 
 Change the value in the [Value] column
+

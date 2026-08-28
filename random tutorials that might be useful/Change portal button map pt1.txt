@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changeportalbuttonmappt1.md — fidelity preserved from original]
+
 Changing the portal's destination map.
 
 1# On the map you'll be leaving from, you need to add dpgoto_ and the map's name.
@@ -55,3 +57,4 @@ dpfrom_(name of the map you came from).
 Meaning we're adding a code that shows you're coming from that map.
 
 Restart the server.
+

@@ -1,5 +1,8 @@
+﻿[Imported to docs/knowledge/tut_editmonstermobdamage.md — fidelity preserved from original]
+
 Open the file Client/DataTable/Character.edf using Structorian and go to the Mob column to locate the mobs.
 
 Search for the mob's name — its id will be the same id in the file Server/RF_Bin/Script/MonsterCharacter.dat
 
 Now just find the id in MonsterCharacter.dat and edit the column m_fAttFcStd, save the file, and restart the server.
+

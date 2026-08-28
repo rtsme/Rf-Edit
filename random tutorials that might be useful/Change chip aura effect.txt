@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changechipauraeffect.md — fidelity preserved from original]
+
 In the file: Cliente/chef/particle.ini it's found on line 181
 Its name is
 
@@ -10,3 +12,4 @@ Located in the folder:
 up/cry_box/
 
 Note: you can create an image to display above the chip, or even a name like: CHIP BELL
+

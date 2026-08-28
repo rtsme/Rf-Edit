@@ -1,3 +1,6 @@
+﻿[Imported to docs/knowledge/tut_changemobname.md — fidelity preserved from original]
+
 Open NDCharacter.edf, located in the folder:
 DataTable/en-gb/
 It can be opened with Structorian.
+

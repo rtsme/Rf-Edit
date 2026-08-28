@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+build/
+backups/
+*.bak
+.rf_repo_cache.json

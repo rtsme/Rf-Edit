@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_convertdattotxt.md — fidelity preserved from original]
+
 Using the parser to convert .dat to .txt
 
 Take the file from the server folder/script/
@@ -38,3 +40,4 @@ itemcash.dat is in the folder "parser/gu_out/CashShop.edf/
 cashshop.dat and cashshop_str.dat are in the folder "parser/gu_out/ServerScript/
 
 nditemcash.dat is in the folder "parser/gu_out/en-gb/"
+

@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changeitemduration.md — fidelity preserved from original]
+
 Let's use the cham as an example — open the file resourcesitem.txt in Excel, and find the item by its server code, example: ircsa31
 
 In its row there's a column called isTime with a value of 0 or 1, 0 for no and 1 for yes.
@@ -21,3 +23,4 @@ When saving both, save as text, tab-separated.
 Go to http://localhost/parser/php2.8/server.php to generate the server's TimerItem.dat
 
 And then go to: http://localhost/parser/php2.8/timeritem.php to generate the client's ItemTimer.edf in the folder gu_out/itemtimer/
+

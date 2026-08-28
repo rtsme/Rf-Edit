@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_itemtablecodeindex.md — fidelity preserved from original]
+
 ```css
 #define item_tbl_num                26    // number of item tables
 #define    tbl_code_upper                0    // upper body
@@ -29,3 +31,4 @@
 ```
 
 Note: this list originally included Korean-language comments next to each code, translated above for clarity.
+

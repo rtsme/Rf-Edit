@@ -1,6 +1,9 @@
+﻿[Imported to docs/knowledge/tut_editserverrateanditemdrop.md — fidelity preserved from original]
+
 Edit server rate and item drop
 Just open the ServerRate file located at server/zoneserver/RF_Bin/Initialize/
 
 Note: item drop cannot exceed 20.0
 For everything you edit, add ".0" at the end, example:
 ExpRate 9999.0
+

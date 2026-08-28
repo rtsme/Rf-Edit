@@ -1,1 +1,4 @@
+﻿[Imported to docs/knowledge/tut_changeitemdroppedbymob.md — fidelity preserved from original]
+
 Open the file: ItemLooting.dat, in the server's script folder, using Structorian, find the monster's code, edit it, and save.
+

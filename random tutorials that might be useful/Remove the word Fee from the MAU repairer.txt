@@ -1,3 +1,6 @@
+﻿[Imported to docs/knowledge/tut_removethewordfeefromthemaurepairer.md — fidelity preserved from original]
+
 To remove the word "Fee" from the MAU repairer, so the player can see the repair cost without the numbers being thrown off, open your client's NDLanguage.edf and go to index: 1047, and change the word "Fee" to 3 spaces in a row, since the word "Fee" has 3 characters, you'll replace it with 3 spaces.
 
 In-game, the word won't appear, and the player will see the repair and customization cost perfectly.
+
