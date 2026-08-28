@@ -10,14 +10,19 @@ which round-trips every chain payload out to CSV and back and diffs the bytes.
 
 Run:  python -m unittest test_rf_edf -v
 """
+import json
+import os
 import struct
+import tempfile
 import unittest
 
 from rf_dat import SchemaError, Table, infer_schema
 from rf_edf import (CHAIN_HEADER, EDF_MIN_TEXT_SHARE, EDF_STRING_WIDTHS,
-                    KEY_LENGTH, MAGIC, EdfError, build_table_chain,
-                    chain_layout, classify, decrypt, encrypt,
-                    parse_table_chain)
+                    EDF_TABLE_GRAMMARS, KEY_LENGTH, MAGIC, EdfError, VarTable,
+                    build_table_chain, build_var_tables, chain_layout,
+                    classify, decrypt, encrypt, grammar_for, parse_table_chain,
+                    parse_var_tables, read_grammar_json, verify_grammar,
+                    write_grammar_json)
 
 
 class ContainerTests(unittest.TestCase):
@@ -186,6 +191,165 @@ class NarrowStringTests(unittest.TestCase):
                               min_text_share=EDF_MIN_TEXT_SHARE)
         self.assertEqual(schema, [("Index", "dword"), ("Code", "string[32]")])
 
+class VariableRecordTests(unittest.TestCase):
+    """BACKLOG #46: count-only tables whose records are not all one size.
+
+    The grammar under test is the real `NDStore.edf` one -- a dword, two
+    64-byte NUL-padded names and a length-prefixed string -- because it
+    exercises every field kind the model has.
+    """
+
+    STORE = EDF_TABLE_GRAMMARS["ndstore.edf"]
+    LANG = EDF_TABLE_GRAMMARS["ndlanguage.edf"]
+
+    def _payload(self, records):
+        """`<u32 count>` then NDStore-shaped records, laid out by hand."""
+        out = struct.pack("<I", len(records))
+        for i, (name1, name2, text) in enumerate(records):
+            out += (struct.pack("<i", i)
+                    + name1.ljust(64, b"\x00") + name2.ljust(64, b"\x00")
+                    + struct.pack("<I", len(text) + 1) + text + b"\x00")
+        return out
+
+    def test_round_trip(self):
+        payload = self._payload([(b"WEAPON", b"WEAPON", b"Buy a sword."),
+                                 (b"POTION", b"POTION", b"Drink up.")])
+        tables = parse_var_tables(payload, self.STORE, "NDStore.edf")
+        self.assertEqual(len(tables), 1)
+        self.assertEqual([r["Id"] for r in tables[0].rows], [0, 1])
+        self.assertEqual(tables[0].rows[0]["Name1"], "WEAPON")
+        self.assertEqual(tables[0].rows[0]["Text"], "Buy a sword.")
+        self.assertEqual(build_var_tables(tables), payload)
+
+    def test_records_may_be_different_sizes(self):
+        # The whole point of the model: one field list, records of unequal
+        # length. A fixed-width schema cannot express this at all.
+        payload = self._payload([(b"A", b"A", b"x"),
+                                 (b"B", b"B", b"a much longer line of text")])
+        tables = parse_var_tables(payload, self.STORE, "NDStore.edf")
+        self.assertEqual(build_var_tables(tables), payload)
+
+    def test_zstr_keeps_bytes_after_the_terminator(self):
+        # NDStore record 18's second name is "COIN EXCHANGE", NULs, and then
+        # uninitialised stack the client never reads. rf_dat's string[64]
+        # would drop it and the payload would not rebuild; zstr[64] treats
+        # only the *trailing* NUL run as padding.
+        junk = b"COIN EXCHANGE".ljust(44, b"\x00") + bytes(range(0xC0, 0xD4))
+        self.assertEqual(len(junk), 64)
+        payload = self._payload([(b"WEAPON", junk, b"Hello.")])
+        tables = parse_var_tables(payload, self.STORE, "NDStore.edf")
+        self.assertTrue(tables[0].rows[0]["Name2"].startswith("COIN EXCHANGE"))
+        self.assertEqual(build_var_tables(tables), payload)
+
+    def test_lpstr_length_is_derived_not_stored(self):
+        # Editing the text has to move the length prefix with it, or a CSV
+        # edit would need the editor to keep a byte count in step by hand.
+        payload = self._payload([(b"WEAPON", b"WEAPON", b"short")])
+        tables = parse_var_tables(payload, self.STORE, "NDStore.edf")
+        tables[0].rows[0]["Text"] = "a considerably longer replacement"
+        rebuilt = build_var_tables(tables)
+        self.assertEqual(rebuilt, self._payload(
+            [(b"WEAPON", b"WEAPON", b"a considerably longer replacement")]))
+
+    def test_refuses_a_string_that_is_not_one_terminated_run(self):
+        # No terminator: re-encoding would silently add one and grow the
+        # record by a byte.
+        blob = struct.pack("<I", 1) + struct.pack("<i", 0) + b"\x00" * 128 \
+            + struct.pack("<I", 5) + b"hello"
+        with self.assertRaises(EdfError):
+            parse_var_tables(blob, self.STORE, "NDStore.edf")
+        # Interior NUL: it would come back truncated at the first one.
+        blob = struct.pack("<I", 1) + struct.pack("<i", 0) + b"\x00" * 128 \
+            + struct.pack("<I", 6) + b"he\x00lo\x00"
+        with self.assertRaises(EdfError):
+            parse_var_tables(blob, self.STORE, "NDStore.edf")
+
+    def test_refuses_a_grammar_that_does_not_close(self):
+        payload = self._payload([(b"WEAPON", b"WEAPON", b"Buy a sword.")])
+        with self.assertRaises(EdfError):
+            parse_var_tables(payload + b"\x00\x00\x00\x00",
+                             self.STORE, "NDStore.edf")
+        with self.assertRaises(EdfError):
+            parse_var_tables(payload[:-4], self.STORE, "NDStore.edf")
+
+    def test_refuses_an_impossible_record_count(self):
+        with self.assertRaises(EdfError):
+            parse_var_tables(struct.pack("<I", 1 << 30), self.LANG, "x.edf")
+
+    def test_csv_round_trip(self):
+        # The hop that matters: out to text, back through a frozen grammar,
+        # and byte-identical bytes at the end of it.
+        payload = self._payload([(b"WEAPON", b"WEAPON", b"Buy a sword."),
+                                 (b"POTION", b"", b"Drink up, \\ friend.")])
+        tables = parse_var_tables(payload, self.STORE, "NDStore.edf")
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = os.path.join(tmp, "t.csv")
+            json_path = os.path.join(tmp, "t.json")
+            tables[0].export_csv(csv_path)
+            write_grammar_json(tables[0].grammar, json_path,
+                               table_name="NDStore.edf#0",
+                               source=tables[0].grammar_source)
+            grammar, doc = read_grammar_json(json_path)
+            self.assertEqual(grammar, self.STORE[0])
+            self.assertEqual(doc["fixed_bytes"], 132)
+            self.assertEqual(doc["variable_fields"], 1)
+            rebuilt = VarTable.from_csv(csv_path, grammar)
+        self.assertEqual(build_var_tables([rebuilt]), payload)
+
+    def test_csv_rejects_reordered_columns(self):
+        payload = self._payload([(b"WEAPON", b"WEAPON", b"Buy a sword.")])
+        tables = parse_var_tables(payload, self.STORE, "NDStore.edf")
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = os.path.join(tmp, "t.csv")
+            tables[0].export_csv(csv_path)
+            with open(csv_path, encoding="ascii") as f:
+                lines = f.read().splitlines()
+            lines[0] = "Name1,Id,Name2,Text"
+            with open(csv_path, "w", encoding="ascii", newline="\n") as f:
+                f.write("\n".join(lines) + "\n")
+            with self.assertRaises(ValueError):
+                VarTable.from_csv(csv_path, self.STORE[0])
+
+    def test_grammar_json_catches_a_hand_edit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "t.json")
+            write_grammar_json(self.STORE[0], json_path)
+            with open(json_path, encoding="ascii") as f:
+                doc = json.load(f)
+            doc["fields"][1]["type"] = "zstr[32]"      # size no longer matches
+            with open(json_path, "w", encoding="ascii", newline="\n") as f:
+                json.dump(doc, f)
+            with self.assertRaises(EdfError):
+                read_grammar_json(json_path)
+
+    def test_verify_grammar_rejects_what_cannot_become_a_csv(self):
+        with self.assertRaises(EdfError):
+            verify_grammar([])
+        with self.assertRaises(EdfError):
+            verify_grammar([("Name", "zstr[8]"), ("Name", "dword")])
+        with self.assertRaises(SchemaError):
+            verify_grammar([("Name", "notatype")])
+
+    def test_registry_covers_only_what_is_proven(self):
+        self.assertIsNotNone(grammar_for("NDLanguage.edf"))
+        self.assertIsNotNone(grammar_for(r"DataTable\en-ph\NDStore.edf"))
+        # Everything else is still an opaque blob, and must stay one until
+        # its grammar is derived rather than guessed.
+        self.assertIsNone(grammar_for("Item.edf"))
+        self.assertIsNone(grammar_for("UIHelp.edf"))
+        for name, grammars in EDF_TABLE_GRAMMARS.items():
+            for grammar in grammars:
+                verify_grammar(grammar, name)
+
+    def test_language_grammar_round_trips(self):
+        payload = struct.pack("<I", 3)
+        for i, text in enumerate([b"Bellato", b"Cora", b"Accretia"]):
+            payload += (struct.pack("<i", i)
+                        + struct.pack("<I", len(text) + 1) + text + b"\x00")
+        tables = parse_var_tables(payload, self.LANG, "NDLanguage.edf")
+        self.assertEqual([r["Text"] for r in tables[0].rows],
+                         ["Bellato", "Cora", "Accretia"])
+        self.assertEqual(build_var_tables(tables), payload)
 
 if __name__ == "__main__":
     unittest.main()
