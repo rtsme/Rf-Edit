@@ -128,9 +128,32 @@ class NarrowStringTests(unittest.TestCase):
 
     def test_server_inference_is_unchanged(self):
         # No string_widths, no allow_short_numbers: the historical behaviour,
-        # high bytes and all.
-        records = [b"\x00\x00\x00\x00" + bytes([0xB0] * 8),
-                   b"\x01\x00\x00\x00" + bytes([0xB1] * 8)]
+        # high bytes and all. Varying high bytes stand in for legacy Korean
+        # text -- a *uniform* run of one high byte is BACKLOG #47's fill-run
+        # sentinel, not text, and is covered separately below.
+        records = [b"\x00\x00\x00\x00" + bytes([0xB0, 0xB1, 0xB2, 0xB3,
+                                                  0xB4, 0xB5, 0xB6, 0xB7]),
+                   b"\x01\x00\x00\x00" + bytes([0xB1, 0xB2, 0xB3, 0xB4,
+                                                 0xB5, 0xB6, 0xB7, 0xB8])]
+        self.assertEqual(infer_schema(records, 12, width=8),
+                         [("Index", "dword"), ("Code", "string[8]")])
+
+    def test_fill_run_is_not_a_string(self):
+        # A slot that is one repeated high byte in every record -- the
+        # client's empty-slot fill (e.g. 64 x 0xFF) -- is not text, at any
+        # width, not just the narrow (<8-byte) slots ascii_only covers.
+        records = [b"\x00\x00\x00\x00" + bytes([0xFF] * 8),
+                   b"\x01\x00\x00\x00" + bytes([0xFF] * 8)]
+        self.assertEqual(infer_schema(records, 12, width=8),
+                         [("Index", "dword"), ("Val1", "dword"),
+                          ("Val2", "dword")])
+
+    def test_fill_run_does_not_block_real_text_elsewhere_in_the_slot(self):
+        # A slot that is fill in most records but real text in at least one
+        # still reads as a string -- the fill records just don't count as
+        # evidence on their own.
+        records = [b"\x00\x00\x00\x00" + bytes([0xFF] * 8),
+                   b"\x01\x00\x00\x00" + b"ITEM0001"]
         self.assertEqual(infer_schema(records, 12, width=8),
                          [("Index", "dword"), ("Code", "string[8]")])
 

@@ -390,6 +390,13 @@ def _looks_like_string_slot(records, pos, width, ascii_only=False):
     no evidence would hide editable numeric fields behind a blank text column.
     At least one record has to actually contain text.
 
+    A record whose slot is nothing but one repeated byte >= 0x80 (no NUL
+    anywhere in it) doesn't count as that evidence either -- that's the
+    client's empty-slot fill (e.g. 64 bytes of 0xFF), not text, and unlike a
+    real high-byte name it never carries a terminator (BACKLOG #47). A slot
+    still reads as a string if some *other* record in it has real text; this
+    only stops fill runs from manufacturing text evidence on their own.
+
     `ascii_only` additionally rejects high bytes. It exists for narrow slots
     (see infer_schema): in four bytes, "no control characters" is nearly no
     evidence at all, and the client's -1 sentinel -- four 0xFF bytes with no
@@ -402,6 +409,8 @@ def _looks_like_string_slot(records, pos, width, ascii_only=False):
         slot = rec[pos:pos + width]
         if len(slot) < width:
             return False
+        if len(set(slot)) == 1 and slot[0] >= 0x80:
+            continue                          # fill run: not text, not disqualifying
         head, _sep, tail = slot.partition(b"\x00")
         if tail.strip(b"\x00"):
             return False                      # data after the terminator
