@@ -51,15 +51,24 @@ size. BACKLOG #46 added the second model those need -- a hand-derived
 field may be fixed-width or variable-width. Two files have one so far,
 `NDLanguage.edf` and `NDStore.edf`.
 
-The remaining 13 stay opaque blobs until someone reads the client's reader for
-them: `classify()` says which file is which and why, and both parsers refuse
-rather than guessing, because a plausible-looking mis-parse would corrupt the
-file on write. See `docs/knowledge/edf-payload-tables.md` for the per-file
-evidence.
+BACKLOG #52 then found that two of the 13 left over are not a third structure
+at all: `en-ph/Exp.edf` and `en-ph/Player.edf` are the server's **plain .dat
+container** -- the full 12-byte `<count><field_count><record_size>` header --
+sitting inside the `.edf` encryption unchanged. They broke the chain walk only
+because it reads eight bytes where they write twelve. That extra `field_count`
+is what makes them readable without disassembling anything: `parse_dat_tables`
+refuses unless a schema inferred from the record bytes alone comes out with
+exactly the number of fields the header declares.
+
+The remaining 11 stay opaque blobs until someone reads the client's reader for
+them: `--classify` says which file is which and why, and every parser here
+refuses rather than guessing, because a plausible-looking mis-parse would
+corrupt the file on write. See `docs/knowledge/edf-payload-tables.md` for the
+per-file evidence.
 
 Usage:
     python rf_edf.py <file.edf> ... --check          # decode+re-encode, diff vs original
-    python rf_edf.py <file.edf> ... --classify       # chain, grammar or neither, and why
+    python rf_edf.py <file.edf> ... --classify       # chain, grammar, .dat or none, and why
     python rf_edf.py <file.edf> ... --check-tables   # payload -> CSV -> payload, byte-exact
     python rf_edf.py <file.edf> --out payload.bin --key-out key.bin
     python rf_edf.py payload.bin --encode --key key.bin --out file.edf
@@ -75,6 +84,10 @@ Usage:
     from rf_edf import grammar_for, parse_var_tables, build_var_tables
         tables = parse_var_tables(payload, grammar_for("NDStore.edf"), "NDStore.edf")
         assert build_var_tables(tables) == payload
+
+    from rf_edf import parse_dat_tables, build_dat_tables
+        tables = parse_dat_tables(payload, "Player.edf")
+        assert build_dat_tables(tables) == payload
 """
 import argparse
 import csv
@@ -350,6 +363,151 @@ def classify(payload, source="EDF payload"):
         return chain_layout(payload, source), ""
     except EdfError as exc:
         return None, str(exc)
+
+# --------------------------------------------------------------------------
+# the third payload: a plain server-style .dat container
+# --------------------------------------------------------------------------
+#
+# BACKLOG #52. Two of the files the chain walk rejected are not a third
+# structure at all -- they are the server's own `.dat` container, sitting
+# inside the `.edf` encryption unchanged:
+#
+#     <u32 record_count> <u32 field_count> <u32 record_size>   12-byte header
+#     record_count * record_size bytes                         fixed records
+#
+# That is the chain header *with* the `field_count` a chain table drops, which
+# is exactly why they broke the chain walk: read eight bytes where the file
+# writes twelve and the record size is really the field count, so the first
+# table runs to the wrong place and everything after it is garbage.
+# `en-ph/Exp.edf` read as "51 records of 5 bytes" and stopped at offset 263;
+# `en-ph/Player.edf` as "5 records of 12 bytes" and stopped at 68.
+#
+# **The field count is what makes this a derivation rather than a guess.** A
+# chain table has nothing in the file to check an inferred schema against
+# (hence `strict_field_count=False` over there). Here the header carries a
+# second, redundant number, and `parse_dat_tables` refuses unless a schema
+# inferred from the record bytes alone -- which never looks at the header --
+# comes out with exactly that many fields. Both files clear it: Exp.edf's
+# 260-byte record infers as 5 fields against a declared 5, Player.edf's
+# 168-byte record as 12 against a declared 12. Two numbers derived
+# independently agreeing is the same class of cross-check as NDStore.edf's
+# 278 records matching Store.edf's.
+#
+# Neither of the other 30 payloads closes under this walk, and neither of
+# these two closes under the chain walk or has a grammar, so the three
+# readings do not compete for a file. See docs/knowledge/edf-payload-tables.md.
+
+DAT_HEADER = "<3I"
+DAT_HEADER_SIZE = struct.calcsize(DAT_HEADER)
+assert DAT_HEADER_SIZE == HEADER_SIZE
+
+
+def dat_layout(payload, source="EDF payload"):
+    """Return `[(record_count, field_count, record_size), ...]` for a .dat payload.
+
+    Structure only, like `chain_layout`, and strict for the same reason: the
+    walk has to consume the payload to the last byte, because a walk that ends
+    early read a header at the wrong offset.
+    """
+    layout = []
+    offset = 0
+    while offset < len(payload):
+        remaining = len(payload) - offset
+        if remaining < DAT_HEADER_SIZE:
+            raise EdfError(
+                "%s: %d byte(s) left after table %d -- too few for another "
+                "12-byte table header" % (source, remaining, len(layout)))
+        count, field_count, rec_size = struct.unpack_from(
+            DAT_HEADER, payload, offset)
+        # A field is at least one byte, so more fields than bytes is not a
+        # header -- it is a chain header being read twelve bytes wide.
+        if (rec_size == 0 or rec_size > MAX_RECORD_SIZE
+                or count > MAX_RECORD_COUNT
+                or field_count == 0 or field_count > rec_size):
+            raise EdfError(
+                "%s: table %d at offset %d reads as %d records of %d field(s) "
+                "in %d bytes, which is not a table header"
+                % (source, len(layout), offset, count, field_count, rec_size))
+        end = offset + DAT_HEADER_SIZE + count * rec_size
+        if end > len(payload):
+            raise EdfError(
+                "%s: table %d at offset %d claims %d records of %d bytes, "
+                "%d past the end of the payload"
+                % (source, len(layout), offset, count, rec_size,
+                   end - len(payload)))
+        layout.append((count, field_count, rec_size))
+        offset = end
+    if not layout:
+        raise EdfError("%s: payload is empty" % source)
+    return layout
+
+
+def _dat_table_from_records(data, count, field_count, rec_size, source):
+    """One .dat table, with the header's field count used as the cross-check.
+
+    Unlike a chain table, this one is checkable: the header says how many
+    fields the record has, and `infer_schema` works the layout out from the
+    bytes without ever seeing that number. If the two disagree, the reading is
+    wrong somewhere and saying so is the only honest answer -- a schema that
+    merely adds up to `rec_size` would still write back corrupted records.
+    """
+    if count == 0:
+        raise EdfError(
+            "%s is empty, so there are no records to check its declared %d "
+            "field(s) against -- the field count is the only thing that makes "
+            "this format readable, and an empty table cannot supply it"
+            % (source, field_count))
+    records = [data[i * rec_size:(i + 1) * rec_size] for i in range(count)]
+    schema = infer_schema(records, rec_size,
+                          string_widths=EDF_STRING_WIDTHS,
+                          allow_short_numbers=True,
+                          min_text_share=EDF_MIN_TEXT_SHARE)
+    if len(schema) != field_count:
+        raise EdfError(
+            "%s: the header declares %d field(s) but the record bytes lay out "
+            "as %d (%s) -- the two have to agree before this can be read"
+            % (source, field_count, len(schema),
+               ", ".join(t for _n, t in schema[:8])))
+    verify_schema(schema, field_count, rec_size)
+
+    rows = []
+    pos = 0
+    for _ in range(count):
+        row = {}
+        for name, ftype in schema:
+            width = field_size(ftype)
+            row[name] = decode(data[pos:pos + width], ftype)
+            pos += width
+        rows.append(row)
+    return Table(schema, rows, field_count, rec_size, source=source,
+                 schema_source="inferred from records (field count checked "
+                               "against the header)")
+
+
+def parse_dat_tables(payload, source="EDF payload"):
+    """Parse a .dat-container payload into `rf_dat.Table`s, consuming every byte."""
+    tables = []
+    offset = 0
+    for count, field_count, rec_size in dat_layout(payload, source):
+        start = offset + DAT_HEADER_SIZE
+        end = start + count * rec_size
+        tables.append(_dat_table_from_records(
+            payload[start:end], count, field_count, rec_size,
+            "%s#%d" % (source, len(tables))))
+        offset = end
+    return tables
+
+
+def build_dat_tables(tables):
+    """Rebuild a .dat-container payload from `rf_dat.Table`s.
+
+    Nothing to strip here, unlike `build_table_chain`: `Table.to_bytes` writes
+    the 12-byte header this format already has.
+    """
+    out = bytearray()
+    for table in tables:
+        out += table.to_bytes()
+    return bytes(out)
 
 # --------------------------------------------------------------------------
 # the other payload: count-only tables with variable-length records
@@ -693,12 +851,15 @@ def read_grammar_json(path):
                doc["field_count"], doc["fixed_bytes"], doc["variable_fields"]))
     return grammar, doc
 
-def _csv_round_trip(tables, name, tmp):
+def _csv_round_trip(tables, name, tmp, build):
     """Write every table out as CSV + frozen layout, read it back, rebuild.
 
-    Both payload models come through here, and each one freezes the layout its
-    own reader needs -- a schema for a chain table, a grammar for a
-    variable-record one.
+    All three payload models come through here, and each one freezes the
+    layout its own reader needs -- a schema for a chain or .dat table, a
+    grammar for a variable-record one. `build` is the matching payload
+    builder, passed in rather than sniffed: a chain table and a .dat table are
+    both `rf_dat.Table`s and differ only in the header they are written back
+    with, so the caller has to say which one it read.
     """
     rebuilt = []
     for i, table in enumerate(tables):
@@ -719,9 +880,7 @@ def _csv_round_trip(tables, name, tmp):
             schema, doc = read_schema_json(layout_path)
             rebuilt.append(Table.from_csv(
                 csv_path, schema, field_count=doc.get("header_field_count")))
-    if isinstance(tables[0], VarTable):
-        return build_var_tables(rebuilt)
-    return build_table_chain(rebuilt)
+    return build(rebuilt)
 
 
 def _check_tables(paths):
@@ -730,10 +889,11 @@ def _check_tables(paths):
     The CSV hop is the point. Parsing a payload proves only that the bytes
     fit; writing the rows out as text, reading them back through the frozen
     layout, and reproducing the payload to the byte is what makes a file safe
-    to *edit*. Files with neither a chain nor a grammar are reported as
+    to *edit*. A file matching none of the three readings is reported as
     unhandled, never silently accepted.
     """
-    chains = grammars = failed = skipped = 0
+    counts = {"chain": 0, "grammar": 0, "dat": 0}
+    failed = skipped = 0
     for path in paths:
         name = os.path.basename(path)
         try:
@@ -745,37 +905,47 @@ def _check_tables(paths):
         grammar = grammar_for(name)
         try:
             if grammar is not None:
-                tables = parse_var_tables(payload, grammar, name)
+                kind, tables, build = ("grammar",
+                                       parse_var_tables(payload, grammar, name),
+                                       build_var_tables)
             else:
-                tables = parse_table_chain(payload, name)
+                kind, tables, build = ("chain",
+                                       parse_table_chain(payload, name),
+                                       build_table_chain)
         except SchemaError as exc:
-            if grammar is None:
-                print("SKIP   %-28s not a table chain: %s"
-                      % (name, str(exc).split(": ", 1)[-1]))
-                skipped += 1
-            else:
+            if grammar is not None:
                 # A registered grammar that no longer fits is a failure, not a
                 # skip: something is wrong with the grammar or with the file,
                 # and either way it must not pass quietly.
                 print("FAIL   %-28s its grammar does not fit: %s"
                       % (name, str(exc).split(": ", 1)[-1]))
                 failed += 1
-            continue
+                continue
+            chain_why = str(exc)
+            try:
+                kind, tables, build = ("dat",
+                                       parse_dat_tables(payload, name),
+                                       build_dat_tables)
+            except SchemaError:
+                # Reported against the chain reading: it is the one that gets
+                # furthest into these payloads, so its message says the most
+                # about where the walk broke.
+                print("SKIP   %-28s not a table chain: %s"
+                      % (name, chain_why.split(": ", 1)[-1]))
+                skipped += 1
+                continue
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                blob = _csv_round_trip(tables, name, tmp)
+                blob = _csv_round_trip(tables, name, tmp, build)
         except (SchemaError, ValueError, OSError) as exc:
             print("FAIL   %-28s %s" % (name, exc))
             failed += 1
             continue
         if blob == payload:
             print("OK     %-28s %-8s %8d bytes  %2d table(s), %d row(s)"
-                  % (name, "grammar" if grammar else "chain", len(payload),
+                  % (name, kind, len(payload),
                      len(tables), sum(len(t.rows) for t in tables)))
-            if grammar:
-                grammars += 1
-            else:
-                chains += 1
+            counts[kind] += 1
         else:
             where = next((i for i in range(min(len(blob), len(payload)))
                           if blob[i] != payload[i]), min(len(blob), len(payload)))
@@ -784,8 +954,9 @@ def _check_tables(paths):
                   % (name, len(blob), len(payload), where))
             failed += 1
     print("\n%d payload(s) round-trip byte-exact through CSV (%d chain, "
-          "%d grammar), %d failed, %d unhandled"
-          % (chains + grammars, chains, grammars, failed, skipped))
+          "%d grammar, %d dat), %d failed, %d unhandled"
+          % (sum(counts.values()), counts["chain"], counts["grammar"],
+             counts["dat"], failed, skipped))
     return 1 if failed else 0
 
 
@@ -797,9 +968,9 @@ def main(argv=None):
     parser.add_argument("--check", action="store_true",
                         help="decode then re-encode each file and diff against the original")
     parser.add_argument("--classify", action="store_true",
-                        help="report whether each payload is a table chain, and why not if it isn't")
+                        help="report which of the three payload readings each file takes, and why none fits if so")
     parser.add_argument("--check-tables", action="store_true",
-                        help="round-trip each chain payload through CSV and diff the bytes")
+                        help="round-trip each readable payload through CSV and diff the bytes")
     parser.add_argument("--encode", action="store_true",
                         help="build a .edf from a decoded payload (needs --key)")
     parser.add_argument("--key", help="file holding the 256-byte decoded key, for --encode")
@@ -820,7 +991,7 @@ def main(argv=None):
         return 0
 
     if args.classify:
-        chains = grammars = 0
+        chains = grammars = dats = 0
         for path in args.file:
             name = os.path.basename(path)
             try:
@@ -848,11 +1019,22 @@ def main(argv=None):
                       % (name, len(payload), len(layout),
                          ", ".join("%dx%d" % (c, r) for c, r in layout[:6])
                          + (", ..." if len(layout) > 6 else "")))
-            else:
+                continue
+            try:
+                tables = parse_dat_tables(payload, name)
+            except SchemaError:
                 print("OTHER  %-28s %8d bytes  %s"
                       % (name, len(payload), why.split(": ", 1)[-1]))
+                continue
+            dats += 1
+            print("DAT    %-28s %8d bytes  %2d table(s)  %s"
+                  % (name, len(payload), len(tables),
+                     ", ".join("%dx%d in %d field(s)"
+                               % (len(t.rows), t.rec_size, t.field_count)
+                               for t in tables[:4])))
         print("\n%d/%d payload(s) are table chains, %d have a hand-derived "
-              "grammar" % (chains, len(args.file), grammars))
+              "grammar, %d are plain .dat containers"
+              % (chains, len(args.file), grammars, dats))
         return 0
 
     if args.check_tables:

@@ -17,12 +17,13 @@ import tempfile
 import unittest
 
 from rf_dat import SchemaError, Table, infer_schema
-from rf_edf import (CHAIN_HEADER, EDF_MIN_TEXT_SHARE, EDF_STRING_WIDTHS,
-                    EDF_TABLE_GRAMMARS, KEY_LENGTH, MAGIC, EdfError, VarTable,
-                    build_table_chain, build_var_tables, chain_layout,
-                    classify, decrypt, encrypt, grammar_for, parse_table_chain,
-                    parse_var_tables, read_grammar_json, verify_grammar,
-                    write_grammar_json)
+from rf_edf import (CHAIN_HEADER, DAT_HEADER, EDF_MIN_TEXT_SHARE,
+                    EDF_STRING_WIDTHS, EDF_TABLE_GRAMMARS, KEY_LENGTH, MAGIC,
+                    EdfError, VarTable, build_dat_tables, build_table_chain,
+                    build_var_tables, chain_layout, classify, dat_layout,
+                    decrypt, encrypt, grammar_for, parse_dat_tables,
+                    parse_table_chain, parse_var_tables, read_grammar_json,
+                    verify_grammar, write_grammar_json)
 
 
 class ContainerTests(unittest.TestCase):
@@ -103,6 +104,75 @@ class ChainTests(unittest.TestCase):
         layout, why = classify(struct.pack(CHAIN_HEADER, 6360, 0), "NDLanguage")
         self.assertIsNone(layout)
         self.assertIn("NDLanguage", why)
+
+
+class DatContainerTests(unittest.TestCase):
+    """The two files that are the server's own .dat container, unchanged.
+
+    What separates this reading from a guess is the header's `field_count`:
+    the schema is inferred from the record bytes alone and then has to agree
+    with it. A chain table has no such number, which is why its schema is
+    taken on trust and this one is not.
+    """
+
+    SCHEMA = [("Index", "dword"), ("Code", "string[16]")]
+    REC_SIZE = 20
+
+    def _payload(self, rows, field_count=2):
+        body = b""
+        for index, code in rows:
+            body += struct.pack("<i", index) + code.ljust(16, b"\x00")
+        return (struct.pack(DAT_HEADER, len(rows), field_count, self.REC_SIZE)
+                + body)
+
+    def test_dat_round_trip(self):
+        payload = self._payload([(0, b"ACM"), (1, b"ACF")])
+        self.assertEqual(dat_layout(payload), [(2, 2, 20)])
+        parsed = parse_dat_tables(payload, "Player.edf")
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0].schema, self.SCHEMA)
+        self.assertEqual(parsed[0].rows[1]["Code"], "ACF")
+        self.assertEqual(build_dat_tables(parsed), payload)
+
+    def test_several_tables_end_to_end(self):
+        payload = (self._payload([(0, b"ACM"), (1, b"ACF")])
+                   + self._payload([(2, b"DEM"), (3, b"DEF")]))
+        self.assertEqual(dat_layout(payload), [(2, 2, 20), (2, 2, 20)])
+        self.assertEqual(build_dat_tables(parse_dat_tables(payload)), payload)
+
+    def test_refuses_a_walk_that_does_not_close(self):
+        payload = self._payload([(0, b"ACM"), (1, b"ACF")])
+        with self.assertRaises(EdfError):
+            dat_layout(payload + bytes(4))
+        with self.assertRaises(EdfError):
+            dat_layout(payload[:-1])
+
+    def test_refuses_more_fields_than_bytes(self):
+        # This is exactly what a chain header looks like read twelve bytes
+        # wide, so it has to be rejected rather than half-read.
+        with self.assertRaises(EdfError):
+            dat_layout(struct.pack(DAT_HEADER, 1, 99, 4) + b"body")
+
+    def test_refuses_a_field_count_the_records_disagree_with(self):
+        # Same bytes, same record size, one wrong number in the header: the
+        # walk still closes on the last byte, and the reading is still wrong.
+        payload = self._payload([(0, b"ACM"), (1, b"ACF")], field_count=3)
+        self.assertEqual(dat_layout(payload), [(2, 3, 20)])
+        with self.assertRaises(EdfError) as caught:
+            parse_dat_tables(payload, "fixture.edf")
+        self.assertIn("declares 3 field(s)", str(caught.exception))
+
+    def test_refuses_an_empty_table(self):
+        # Nothing to check the declared field count against, and the field
+        # count is the only reason this format is readable at all.
+        with self.assertRaises(EdfError):
+            parse_dat_tables(struct.pack(DAT_HEADER, 0, 2, 20), "fixture.edf")
+
+    def test_a_chain_payload_is_not_read_as_a_dat(self):
+        chain = build_table_chain([_table([("Val1", "dword")],
+                                          [{"Val1": 42}], 4)])
+        with self.assertRaises(EdfError):
+            dat_layout(chain, "fixture.edf")
 
 
 class NarrowStringTests(unittest.TestCase):
