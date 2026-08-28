@@ -19,9 +19,11 @@ import unittest
 from rf_dat import SchemaError, Table, infer_schema
 from rf_edf import (CHAIN_HEADER, CHAIN_HEADER_SIZE, DAT_HEADER, EDF_MIN_TEXT_SHARE,
                     EDF_STRING_WIDTHS, EDF_TABLE_GRAMMARS, KEY_LENGTH, MAGIC,
-                    LPSTR, MAX_WPSTR, POOLSTR, WPSTR, BlockGrammar,
+                    LPSTR, MAX_WPSTR, POOLSTR, WPSTR, BYTE_LENGTH, SAME_COUNT,
+                    BlockGrammar,
                     BlockTable, ChainGrammar, ChainTable,
-                    EdfError, PoolGrammar, PoolTable,
+                    EdfError, NestGrammar, NestRun, NestTable, PoolGrammar,
+                    PoolTable,
                     VarTable, build_dat_tables, build_table_chain,
                     build_var_tables, chain_layout, chain_record_size,
                     classify, dat_layout,
@@ -417,11 +419,11 @@ class VariableRecordTests(unittest.TestCase):
         self.assertIsNotNone(grammar_for("GameData.edf"))
         self.assertIsNotNone(grammar_for("NDEventShip.edf"))
         self.assertIsNotNone(grammar_for("Resource.edf"))
+        self.assertIsNotNone(grammar_for("Map.edf"))
         # Everything else is still an opaque blob, and must stay one until
         # its grammar is derived rather than guessed.
         self.assertIsNone(grammar_for("Item.edf"))
         self.assertIsNone(grammar_for("NDMap.edf"))
-        self.assertIsNone(grammar_for("Map.edf"))
         for name, grammars in EDF_TABLE_GRAMMARS.items():
             for grammar in grammars:
                 verify_grammar(grammar, name)
@@ -1215,6 +1217,244 @@ class AssetManifestTests(unittest.TestCase):
         tables[0].rows[0]["BoneFile"] = "B" * 65
         with self.assertRaises(EdfError):
             build_var_tables(tables)
+
+class NestedRunTests(unittest.TestCase):
+    """BACKLOG #52: a block with several nested runs, and fields after them.
+
+    Two grammars under test, both the real `Map.edf` ones. The minimap table
+    exercises the two new ways a run can state its length that BlockGrammar
+    had no room for -- a byte length rather than a record count -- and the map
+    block exercises the other, a run that shares the count of the run before
+    it, along with block fields that sit *after* every run.
+    """
+
+    MAP = EDF_TABLE_GRAMMARS["map.edf"]
+    BLOCK = MAP[0]
+    MINI = MAP[1]
+
+    # ---- minimaps: <u32 W><u32 H><u32 len><name>, marks, then cells -------
+
+    def _mini(self, w, h, name, marks, cells):
+        out = struct.pack("<III", w, h, len(name) + 1) + name + b"\x00"
+        out += struct.pack("<I", len(marks))
+        for mark in marks:
+            out += struct.pack("<4i", *mark)
+        out += struct.pack("<I", len(cells) * 3)
+        for repeat, value in cells:
+            out += struct.pack("<HB", repeat, value)
+        return out
+
+    def _minis(self, minis):
+        return struct.pack("<I", len(minis)) + b"".join(
+            self._mini(*m) for m in minis)
+
+    GRID = [(3, 0), (1, 7), (1, 0)]          # 4 + 2 + 2 = 8 cells
+
+    def test_round_trip(self):
+        payload = self._minis([
+            (4, 2, b"Cora", [(0x372E01, 1, 2, 5)], self.GRID),
+            (4, 2, b"Elan", [], self.GRID),
+        ])
+        tables = parse_var_tables(payload, [self.MINI], "Map.edf")
+        self.assertIsInstance(tables[0], NestTable)
+        self.assertEqual([r["Name"] for r in tables[0].rows], ["Cora", "Elan"])
+        self.assertEqual([len(g) for g in tables[0].runs[0]], [1, 0])
+        self.assertEqual(tables[0].runs[0][0][0]["Y"], 1)
+        self.assertEqual(tables[0].runs[1][0][1]["Value"], 7)
+        self.assertEqual(build_var_tables(tables), payload)
+
+    def test_the_cells_cover_the_grid(self):
+        # What proves the triplet: a run is `Repeat + 1` cells long, and the
+        # runs add up to exactly the Width x Height the record states.
+        tables = parse_var_tables(
+            self._minis([(4, 2, b"Cora", [], self.GRID)]), [self.MINI], "m")
+        row, cells = tables[0].rows[0], tables[0].runs[1][0]
+        self.assertEqual(sum(c["Repeat"] + 1 for c in cells),
+                         row["Width"] * row["Height"])
+
+    def test_the_byte_length_is_derived_not_stored(self):
+        # Not a column, so adding a cell row cannot leave a stale length
+        # behind -- and a stale one here would move every byte after it.
+        self.assertNotIn("Length", [n for n, _ in self.MINI.head])
+        tables = parse_var_tables(
+            self._minis([(4, 2, b"Cora", [], self.GRID)]), [self.MINI], "m")
+        tables[0].runs[1][0].append({"Repeat": 0, "Value": 1})
+        self.assertEqual(
+            build_var_tables(tables),
+            self._minis([(4, 2, b"Cora", [], self.GRID + [(0, 1)])]))
+
+    def test_refuses_a_length_that_is_not_whole_records(self):
+        payload = bytearray(self._minis([(4, 2, b"Cora", [], self.GRID)]))
+        payload[-10] = 8                      # the <u32 9> in front of the cells
+        with self.assertRaises(EdfError):
+            parse_var_tables(bytes(payload), [self.MINI], "Map.edf")
+
+    def test_refuses_a_grammar_that_does_not_close(self):
+        payload = self._minis([(4, 2, b"Cora", [], self.GRID)]) + b"\x00"
+        with self.assertRaises(EdfError):
+            parse_var_tables(payload, [self.MINI], "Map.edf")
+
+    # ---- map blocks: one count, two runs, and 19 dwords after them --------
+
+    def _record(self, block, index, name):
+        return (struct.pack("<ii", block, index) + b"\x00" * 88
+                + struct.pack("<3IB", 0, 0, 0, 0)
+                + name + b"\x00" * (128 - len(name))
+                + b"\x00" * 3 + b"\x00" * 48)
+
+    def _block(self, block_id, name, records, links, n_areas, passages):
+        out = (struct.pack("<i", block_id) + name + b"\x00" * (32 - len(name))
+               + b"\x00" * 256 + struct.pack("<HI", 0, len(records)))
+        for i, rname in enumerate(records):
+            out += self._record(block_id, i, rname)
+        for link in links:
+            out += struct.pack("<ii", *link)
+        out += struct.pack("<I", n_areas) + b"\x00" * (96 * n_areas)
+        out += struct.pack("<I", len(passages))
+        for index, pname in passages:
+            out += (struct.pack("<5i", index, 0, 0, 0, 0)
+                    + pname + b"\x00" * (64 - len(pname)))
+        return out + struct.pack("<19i", *range(19))
+
+    def _blocks(self, blocks):
+        return struct.pack("<I", len(blocks)) + b"".join(
+            self._block(*b) for b in blocks)
+
+    def _one(self):
+        return self._blocks([
+            (0, b"NeutralB", [b"dpgoto_bellato_HQ", b"dpfrom_bl_grsd"],
+             [(-1, -1), (25, 1)], 0, [(0, b"Union HQ Portal")]),
+        ])
+
+    def test_a_block_reads_its_runs_and_then_its_trailer(self):
+        tables = parse_var_tables(self._one(), [self.BLOCK], "Map.edf")
+        table = tables[0]
+        self.assertEqual(table.rows[0]["Name"], "NeutralB")
+        self.assertEqual([n for n, _ in self.BLOCK.runs[0].fields][:2],
+                         ["MapIndex", "Index"])
+        self.assertEqual(table.runs[0][0][1]["Name"], "dpfrom_bl_grsd")
+        self.assertEqual(table.runs[1][0][1], {"ToMap": 25, "ToRecord": 1})
+        self.assertEqual(table.runs[2][0], [])
+        self.assertEqual(table.runs[3][0][0]["Name"], "Union HQ Portal")
+        # The 19 trailing dwords belong to the block, not to any run.
+        self.assertEqual(table.rows[0]["Unknown20"], 18)
+        self.assertEqual(build_var_tables(tables), self._one())
+
+    def test_the_links_share_the_records_count(self):
+        # The file states one number for both arrays, so a links row without a
+        # records row has nowhere to be written and is refused rather than
+        # silently dropping the rest of the block.
+        self.assertEqual(self.BLOCK.runs[1].count, SAME_COUNT)
+        tables = parse_var_tables(self._one(), [self.BLOCK], "Map.edf")
+        tables[0].runs[1][0].append({"ToMap": -1, "ToRecord": -1})
+        with self.assertRaises(EdfError):
+            build_var_tables(tables)
+
+    def test_a_block_with_no_records_is_still_a_block(self):
+        payload = self._blocks([(0, b"Empty", [], [], 0, [])])
+        tables = parse_var_tables(payload, [self.BLOCK], "Map.edf")
+        self.assertEqual([len(g) for g in tables[0].runs[0]], [0])
+        self.assertEqual(build_var_tables(tables), payload)
+
+    # ---- the CSVs, and the frozen grammar ---------------------------------
+
+    def test_csv_round_trip_writes_one_file_per_run(self):
+        payload = self._blocks([
+            (0, b"NeutralB", [b"dpgoto_bellato_HQ"], [(-1, -1)], 0,
+             [(0, b"Union HQ Portal")]),
+            (1, b"Dungeon00", [], [], 0, []),
+        ])
+        tables = parse_var_tables(payload, [self.BLOCK], "Map.edf")
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = os.path.join(tmp, "t.csv")
+            json_path = os.path.join(tmp, "t.json")
+            tables[0].export_csv(csv_path)
+            for run in ("records", "links", "areas", "passages"):
+                self.assertTrue(
+                    os.path.exists(NestTable.run_path(csv_path, run)), run)
+            with open(NestTable.run_path(csv_path, "records"),
+                      encoding="ascii") as f:
+                head = f.read().splitlines()
+            self.assertEqual(head[0].split(",")[0], "Block")
+            self.assertEqual([line.split(",")[0] for line in head[1:]], ["0"])
+            # Head and tail fields are one row's worth of facts and share the
+            # block CSV, even though runs sit between them in the payload.
+            with open(csv_path, encoding="ascii") as f:
+                columns = f.read().splitlines()[0].split(",")
+            self.assertEqual(columns[0], "Id")
+            self.assertEqual(columns[-1], "Unknown20")
+            write_grammar_json(tables[0].grammar, json_path,
+                               table_name="Map.edf#0",
+                               source=tables[0].grammar_source)
+            grammar, doc = read_grammar_json(json_path)
+            self.assertEqual(grammar, self.BLOCK)
+            self.assertEqual(doc["kind"], "nest")
+            self.assertEqual([r["name"] for r in doc["runs"]],
+                             ["records", "links", "areas", "passages"])
+            self.assertEqual([r["count_type"] for r in doc["runs"]],
+                             ["udword", SAME_COUNT, "udword", "udword"])
+            self.assertEqual(doc["runs"][0]["fixed_bytes"], 288)
+            self.assertEqual(doc["tail_fixed_bytes"], 76)
+            rebuilt = NestTable.from_csv(csv_path, grammar)
+        self.assertEqual(build_var_tables([rebuilt]), payload)
+
+    def test_grammar_json_catches_a_hand_edit_to_a_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.json")
+            write_grammar_json(self.MINI, path)
+            with open(path, encoding="ascii") as f:
+                doc = json.load(f)
+            doc["runs"][1]["fields"][0]["type"] = "udword"
+            with open(path, "w", encoding="ascii", newline="\n") as f:
+                json.dump(doc, f)
+            with self.assertRaises(EdfError):
+                read_grammar_json(path)
+
+    def test_run_csv_rejects_rows_out_of_block_order(self):
+        payload = self._blocks([
+            (0, b"A", [b"one"], [(-1, -1)], 0, []),
+            (1, b"B", [b"two"], [(-1, -1)], 0, []),
+        ])
+        tables = parse_var_tables(payload, [self.BLOCK], "Map.edf")
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = os.path.join(tmp, "t.csv")
+            tables[0].export_csv(csv_path)
+            rpath = NestTable.run_path(csv_path, "records")
+            with open(rpath, encoding="ascii") as f:
+                lines = f.read().splitlines()
+            with open(rpath, "w", encoding="ascii", newline="\n") as f:
+                f.write("\n".join([lines[0], lines[2], lines[1]]) + "\n")
+            with self.assertRaises(ValueError):
+                NestTable.from_csv(csv_path, self.BLOCK)
+
+    def test_verify_grammar_rejects_a_nest_grammar_that_cannot_work(self):
+        head = [("Id", "dword")]
+        run = NestRun("items", "udword", [("Val", "dword")])
+        verify_grammar(NestGrammar(head, [run], []))
+        with self.assertRaises(SchemaError):          # nothing nested at all
+            verify_grammar(NestGrammar(head, [], []))
+        with self.assertRaises(SchemaError):          # no run before it
+            verify_grammar(NestGrammar(head, [run._replace(count=SAME_COUNT)], []))
+        with self.assertRaises(SchemaError):          # two runs, one CSV name
+            verify_grammar(NestGrammar(head, [run, run], []))
+        with self.assertRaises(SchemaError):          # not a count type
+            verify_grammar(NestGrammar(head, [run._replace(count="float")], []))
+        with self.assertRaises(SchemaError):          # bytes, but how many?
+            verify_grammar(NestGrammar(head, [NestRun(
+                "items", BYTE_LENGTH, [("Text", LPSTR)])], []))
+        with self.assertRaises(SchemaError):          # that column is the join
+            verify_grammar(NestGrammar(head, [NestRun(
+                "items", "udword", [("Block", "dword")])], []))
+        with self.assertRaises(SchemaError):          # head and tail collide
+            verify_grammar(NestGrammar(head, [run], [("Id", "dword")]))
+
+    def test_map_is_one_block_table_and_two_minimap_tables(self):
+        # The 31 world minimaps and the 7 world-map insets are the same shape
+        # written twice, which is why the file needs no count in front of them.
+        self.assertEqual(len(self.MAP), 3)
+        self.assertEqual(self.MAP[1], self.MAP[2])
+        self.assertEqual([r.name for r in self.BLOCK.runs],
+                         ["records", "links", "areas", "passages"])
 
 
 if __name__ == "__main__":
