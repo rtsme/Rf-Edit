@@ -1,0 +1,4 @@
+
+# Python bytecode -- rf_edf.py is documented as an importable module.
+__pycache__/
+*.pyc
