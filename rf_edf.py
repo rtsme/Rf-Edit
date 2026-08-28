@@ -70,7 +70,20 @@ is what makes them readable without disassembling anything: `parse_dat_tables`
 refuses unless a schema inferred from the record bytes alone comes out with
 exactly the number of fields the header declares.
 
-The remaining 9 stay opaque blobs until someone reads the client's reader for
+BACKLOG #52 then found two shapes where a record's text is not in the record
+at all: it sits in one **pool** after the table, in record order, and the
+record holds only its length. `en-ph/NDMsgMonster.edf` is the array form -- a
+`PoolGrammar` of twenty length slots and a count of how many are used, so a
+monster has a *list* of messages and the table writes two CSVs like a block
+one does. `en-ph/NDQuest.edf` is the single form: there the length is one
+ordinary fixed field among three dwords (`POOLSTR`), so a string is one
+column of one row and there is nothing to join. NDQuest is also the first
+file that is chain-shaped in part -- its two tables carry the full 8-byte
+header -- which is what `ChainGrammar` reads: a chain-format table with a
+hand-written field list, checked against the record size the file itself
+states.
+
+The remaining 6 stay opaque blobs until someone reads the client's reader for
 them: `--classify` says which file is which and why, and every parser here
 refuses rather than guessing, because a plausible-looking mis-parse would
 corrupt the file on write. See `docs/knowledge/edf-payload-tables.md` for the
@@ -576,6 +589,29 @@ WPSTR = "wpstr"
 # after it would move.
 MAX_WPSTR = 0xFFFF
 
+# `<u32 len>` in the record, and the bytes it measures **not** in the record:
+# they sit in one pool after the table, in record order. BACKLOG #52 derived
+# this in NDQuest.edf, where a quest's text is one field among three ordinary
+# dwords.
+#
+# The terminator is counted in the length and the CSV holds the text without
+# it -- LPSTR's contract exactly, and read with the same check, so a pooled
+# string is the one thing in this shape that can say on its own whether the
+# walk is still in step. The length is derived on write and never a column.
+# That matters more here than for LPSTR: a length that disagreed with its
+# string would not truncate that string, it would move every byte of the pool
+# after it.
+#
+# It is a *field* kind and not a table kind because in the record it is an
+# ordinary fixed 4 bytes at a fixed offset, inside a record whose size the
+# table header states. PoolGrammar below is the other arrangement -- an array
+# of lengths and a count of how many are used -- and neither reduces to the
+# other: there a record has a *list* of strings, here a string is one field
+# the record always has.
+POOLSTR = "poolstrz"
+POOLSTR_FORMAT = "<I"
+POOLSTR_SIZE = struct.calcsize(POOLSTR_FORMAT)
+
 # A fixed N-byte NUL-padded field, kept apart from rf_dat's `string[N]`
 # deliberately. `string[N]` decodes to the first NUL and re-encodes NUL-padded,
 # which is right for the server's `.dat` fields and wrong here: NDStore record
@@ -594,6 +630,10 @@ def field_width(ftype):
         return int(m.group(1))
     if ftype in (LPSTR, WPSTR):
         return None
+    if ftype == POOLSTR:
+        # Fixed, and that is the point of the kind: what the record holds is
+        # the 4-byte length. The text it measures is in the table's pool.
+        return POOLSTR_SIZE
     return field_size(ftype)
 
 
@@ -633,6 +673,9 @@ def read_field(data, pos, ftype, where):
                            "of the table"
                            % (where, length, pos + length - len(data)))
         return data[pos:pos + length].decode("latin-1"), pos + length
+    if ftype == POOLSTR:
+        raise EdfError("%s: a pooled string is read by its table, which knows "
+                       "where the pool starts -- not field by field" % where)
     width = field_size(ftype)
     if pos + width > len(data):
         raise EdfError("%s: %s runs %d byte(s) past the end of the table"
@@ -662,13 +705,17 @@ def write_field(value, ftype):
             raise ValueError("too long: %d bytes, a 2-byte length prefix "
                              "holds %d" % (len(raw), MAX_WPSTR))
         return struct.pack("<H", len(raw)) + raw
+    if ftype == POOLSTR:
+        raise EdfError("a pooled string is written by its table, which writes "
+                       "the length here and the text in the pool -- not field "
+                       "by field")
     return encode(value, ftype)
 
 
 def parse_field(text, ftype):
     """Turn CSV text into a value `write_field` will accept, or raise."""
     m = _ZSTR_RE.match(ftype)
-    if m or ftype in (LPSTR, WPSTR):
+    if m or ftype in (LPSTR, WPSTR, POOLSTR):
         try:
             raw = text.encode("latin-1")
         except UnicodeEncodeError:
@@ -677,7 +724,7 @@ def parse_field(text, ftype):
         if m and len(raw) > int(m.group(1)):
             raise ValueError("too long: %d bytes, field holds %s"
                              % (len(raw), m.group(1)))
-        if ftype == LPSTR and b"\x00" in raw:
+        if ftype in (LPSTR, POOLSTR) and b"\x00" in raw:
             raise ValueError("must not contain a NUL byte -- the terminator "
                              "is written for you")
         if ftype == WPSTR and len(raw) > MAX_WPSTR:
@@ -707,6 +754,29 @@ BLOCK_COUNT_TYPES = ("ubyte", "uword", "udword")
 # The items CSV's first column: which block the row belongs to. It is the join
 # between the two files, so no item field may share the name.
 BLOCK_COLUMN = "Block"
+
+
+# A **chain** grammar: BACKLOG #52's fourth shape, and the plainest of them
+# -- an ordinary 8-byte chain-format table read with a hand-written field list
+# instead of an inferred schema.
+#
+# The 17 chain files need no such thing: `parse_table_chain` walks them and
+# `rf_dat` infers their schemas. But a file that is chain-shaped in *part* and
+# something else after it cannot go through that walk at all, and its
+# chain-shaped tables still have to be read. NDQuest.edf is that file: 262
+# names in a chain table, then a chain table of records whose text is pooled
+# behind them.
+#
+# The header states the record size, so this is the one grammar kind that can
+# be checked against the file rather than merely fitting inside it: the
+# fields have to add up to the number the file itself declares. A field may be
+# POOLSTR, and then the table's pool follows its records.
+ChainGrammar = collections.namedtuple("ChainGrammar", "fields")
+
+
+def chain_record_size(grammar):
+    """Bytes one record occupies -- what its table header must say."""
+    return sum(field_width(t) for _, t in grammar.fields)
 
 
 # A **pool** grammar: BACKLOG #52's third shape, the one NDMsgMonster.edf is.
@@ -759,6 +829,14 @@ def _verify_fields(grammar, source):
 
 def verify_grammar(grammar, source="grammar"):
     """Reject a grammar that could not produce a usable CSV. Returns it."""
+    if isinstance(grammar, ChainGrammar):
+        _verify_fields(grammar.fields, "%s record" % source)
+        for name, ftype in grammar.fields:
+            if field_width(ftype) is None:
+                raise EdfError("%s: field %s is variable-width, and a "
+                               "chain-format record is not -- its size is "
+                               "stated in the table header" % (source, name))
+        return grammar
     if isinstance(grammar, PoolGrammar):
         for what, ftype in (("slot", grammar.slot_type),
                             ("string count", grammar.count)):
@@ -956,6 +1034,35 @@ EDF_TABLE_GRAMMARS = {
     "ndmsgmonster.edf": [
         PoolGrammar(lead=[("Id", "dword")], slot_type="udword", slots=20,
                     count="udword", item="Text"),
+    ],
+    # BACKLOG #52. Two chain-format tables and one pool: 262 x 32 NUL-padded
+    # quest-item names, then 4176 x 16-byte records whose text is not in them,
+    # then those 4176 strings end to end, ending exactly on the last of 645282
+    # payload bytes.
+    #
+    # **What makes this a derivation and not a guess is that the file states
+    # each string's length separately, and all 4176 agree.** Every record's
+    # third dword is exactly its string's length with the terminator counted,
+    # for all 4176 -- one boundary wrong anywhere would put one of those 4176
+    # agreements out. `Id` runs 0..4175 independently of that, matching the
+    # 4176 the header declares, and both tables' 8-byte headers state a record
+    # size the grammar has to add up to, which ChainTable checks rather than
+    # assumes: 32 and 16.
+    #
+    # The two zero dwords are numbered rather than named. They are zero in all
+    # 4176 records, which is exactly as consistent with padding as with fields
+    # nothing in this file ever sets -- and the same `<u32 id><u32 0><u32 len>`
+    # prefix opens NDItem.edf's 45 description tables, where the text is
+    # inline instead of pooled. Two files spelling the same three fields the
+    # same way is worth more than either reading of the spare.
+    #
+    # What the names in the first table are *for* the file does not say: 262
+    # of them against 4176 strings is not a per-quest pairing, and nothing
+    # here indexes one into the other. They keep file order and no role.
+    "ndquest.edf": [
+        ChainGrammar([("Name", "zstr[32]")]),
+        ChainGrammar([("Id", "dword"), ("Unknown1", "dword"),
+                      ("Text", POOLSTR), ("Unknown2", "dword")]),
     ],
 }
 
@@ -1433,6 +1540,153 @@ class PoolTable(object):
         return rows
 
 
+class ChainTable(object):
+    """A chain-format table read with a hand-written grammar.
+
+    `<u32 record_count><u32 record_size>`, then the fixed records, then -- if
+    any field is POOLSTR -- those fields' strings in one pool after them, in
+    record order and field order inside a record.
+
+    One CSV, not two. A pooled string here is one field of one record, so it
+    is one column, and the invariant the whole layer rests on holds unchanged:
+    one row per record, columns in record order. PoolTable needs a second file
+    only because over there a record has a *list* of strings, and a list does
+    not fit in a column.
+
+    Deliberately not an `rf_dat.Table` subclass, for VarTable's reason and one
+    more: Table computes its record size from the schema and writes the
+    record's own bytes, and a pooled field's bytes are not in the record it is
+    a field of.
+    """
+
+    def __init__(self, grammar, rows, source=None, grammar_source=None):
+        self.grammar = verify_grammar(grammar, source or "grammar")
+        self.rows = rows
+        self.source = source
+        self.grammar_source = grammar_source
+
+    @classmethod
+    def parse(cls, data, offset, grammar, source):
+        """Read the table at `offset`, and its pool if it has one.
+
+        Returns the table and the offset just past everything it owns.
+        """
+        verify_grammar(grammar, source)
+        if offset + CHAIN_HEADER_SIZE > len(data):
+            raise EdfError("%s: %d byte(s) left, too few for an 8-byte table "
+                           "header" % (source, len(data) - offset))
+        count, rec_size = struct.unpack_from(CHAIN_HEADER, data, offset)
+        pos = offset + CHAIN_HEADER_SIZE
+        if count > MAX_RECORD_COUNT:
+            raise EdfError("%s: reads as %d records, which is not a record "
+                           "count" % (source, count))
+        want = chain_record_size(grammar)
+        if rec_size != want:
+            raise EdfError("%s: the header says %d-byte records and the "
+                           "grammar describes %d -- the grammar does not fit "
+                           "this file" % (source, rec_size, want))
+        rows, pooled = [], []
+        for i in range(count):
+            row, lens = {}, []
+            for name, ftype in grammar.fields:
+                if ftype == POOLSTR:
+                    if pos + POOLSTR_SIZE > len(data):
+                        raise EdfError("%s record %d field %s: no room for "
+                                       "the 4-byte pooled length"
+                                       % (source, i, name))
+                    lens.append(
+                        (name,
+                         struct.unpack_from(POOLSTR_FORMAT, data, pos)[0]))
+                    pos += POOLSTR_SIZE
+                    continue
+                row[name], pos = read_field(
+                    data, pos, ftype,
+                    "%s record %d field %s" % (source, i, name))
+            rows.append(row)
+            pooled.append(lens)
+        # The pool: every record's strings end to end, in record order, and in
+        # field order inside a record. Nothing separates them but the lengths
+        # already read, so this walk is the claim the grammar is making.
+        for i, lens in enumerate(pooled):
+            for name, length in lens:
+                where = "%s record %d field %s" % (source, i, name)
+                if length < 1:
+                    raise EdfError("%s: its length says %d bytes, too few for "
+                                   "even a terminator" % (where, length))
+                if pos + length > len(data):
+                    raise EdfError("%s: its length says %d bytes, %d past the "
+                                   "end of the payload"
+                                   % (where, length, pos + length - len(data)))
+                blob = data[pos:pos + length]
+                # LPSTR's contract, and it does LPSTR's work: a pooled string
+                # is the one thing here that can say on its own whether the
+                # walk is still in step.
+                if not blob.endswith(b"\x00") or b"\x00" in blob[:-1]:
+                    raise EdfError(
+                        "%s: the %d bytes its length points at are not one "
+                        "NUL-terminated run (%r) -- the grammar does not fit "
+                        "this file" % (where, length, blob[:32]))
+                rows[i][name] = blob[:-1].decode("latin-1")
+                pos += length
+        return cls(grammar, rows, source=source,
+                   grammar_source="hand-derived (EDF_TABLE_GRAMMARS)"), pos
+
+    def to_bytes(self):
+        where = self.source or "table"
+        out = bytearray(struct.pack(CHAIN_HEADER, len(self.rows),
+                                    chain_record_size(self.grammar)))
+        pool = bytearray()
+        for i, row in enumerate(self.rows):
+            for name, ftype in self.grammar.fields:
+                if ftype != POOLSTR:
+                    try:
+                        out += write_field(row[name], ftype)
+                    except ValueError as exc:
+                        raise EdfError("%s record %d field %s: %s"
+                                       % (where, i, name, exc))
+                    continue
+                try:
+                    raw = str(row[name]).encode("latin-1")
+                except UnicodeEncodeError:
+                    raise EdfError("%s record %d field %s: contains characters "
+                                   "this file's encoding can't store (latin-1 "
+                                   "only; paste plain text)"
+                                   % (where, i, name))
+                if b"\x00" in raw:
+                    raise EdfError("%s record %d field %s: must not contain a "
+                                   "NUL byte -- the terminator is written for "
+                                   "you" % (where, i, name))
+                # Derived, never carried: a length disagreeing with its string
+                # would not truncate that string, it would move every byte of
+                # the pool after it.
+                try:
+                    out += struct.pack(POOLSTR_FORMAT, len(raw) + 1)
+                except struct.error:
+                    raise EdfError("%s record %d field %s: %d bytes is more "
+                                   "than a 4-byte pooled length can hold"
+                                   % (where, i, name, len(raw) + 1))
+                pool += raw + b"\x00"
+        return bytes(out + pool)
+
+    @classmethod
+    def from_csv(cls, csv_path, grammar):
+        t = cls(grammar, [], source=os.path.basename(csv_path),
+                grammar_source=os.path.basename(csv_path))
+        t.import_csv(csv_path)
+        return t
+
+    def export_csv(self, path):
+        names = [n for n, _ in self.grammar.fields]
+        _write_csv(path, names,
+                   ([escape_text(str(row[n])) for n in names]
+                    for row in self.rows))
+
+    def import_csv(self, path):
+        _leads, rows = _read_csv(path, self.grammar.fields)
+        self.rows = rows
+        return rows
+
+
 def parse_var_tables(payload, grammars, source="EDF payload"):
     """Parse a count-only payload into `VarTable`s, consuming every byte.
 
@@ -1447,6 +1701,8 @@ def parse_var_tables(payload, grammars, source="EDF payload"):
             reader = PoolTable
         elif isinstance(grammar, BlockGrammar):
             reader = BlockTable
+        elif isinstance(grammar, ChainGrammar):
+            reader = ChainTable
         else:
             reader = VarTable
         table, offset = reader.parse(
@@ -1489,7 +1745,11 @@ def write_grammar_json(grammar, path, table_name="", source=""):
     same reason -- there are more numbers to get wrong, not fewer.
     """
     doc = {"table": table_name, "grammar_source": source}
-    if isinstance(grammar, PoolGrammar):
+    if isinstance(grammar, ChainGrammar):
+        doc["kind"] = "chain"
+        doc["record_bytes"] = chain_record_size(grammar)
+        doc.update(_layout_doc(grammar.fields))
+    elif isinstance(grammar, PoolGrammar):
         doc["kind"] = "pool"
         doc["slot_type"] = grammar.slot_type
         doc["slots"] = grammar.slots
@@ -1532,6 +1792,15 @@ def read_grammar_json(path):
     with open(path, "r", encoding="ascii") as f:
         doc = json.load(f)
     where = os.path.basename(path)
+    if doc.get("kind") == "chain":
+        grammar = ChainGrammar(_read_layout(doc, where))
+        verify_grammar(grammar, where)
+        if chain_record_size(grammar) != doc["record_bytes"]:
+            raise EdfError("%s is inconsistent: the grammar describes a "
+                           "%d-byte record, the header says %d"
+                           % (where, chain_record_size(grammar),
+                              doc["record_bytes"]))
+        return grammar, doc
     if doc.get("kind") == "pool":
         grammar = PoolGrammar(_read_layout(doc, where), doc["slot_type"],
                               doc["slots"], doc["string_count_type"],
@@ -1567,7 +1836,7 @@ def _csv_round_trip(tables, name, tmp, build):
         csv_path = os.path.join(tmp, "%02d.csv" % i)
         layout_path = os.path.join(tmp, "%02d.json" % i)
         table.export_csv(csv_path)
-        if isinstance(table, (VarTable, BlockTable, PoolTable)):
+        if isinstance(table, (VarTable, BlockTable, PoolTable, ChainTable)):
             write_grammar_json(table.grammar, layout_path,
                                table_name="%s#%d" % (name, i),
                                source=table.grammar_source)

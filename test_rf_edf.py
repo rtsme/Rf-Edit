@@ -19,13 +19,16 @@ import unittest
 from rf_dat import SchemaError, Table, infer_schema
 from rf_edf import (CHAIN_HEADER, CHAIN_HEADER_SIZE, DAT_HEADER, EDF_MIN_TEXT_SHARE,
                     EDF_STRING_WIDTHS, EDF_TABLE_GRAMMARS, KEY_LENGTH, MAGIC,
-                    LPSTR, MAX_WPSTR, WPSTR, BlockGrammar, BlockTable,
+                    LPSTR, MAX_WPSTR, POOLSTR, WPSTR, BlockGrammar,
+                    BlockTable, ChainGrammar, ChainTable,
                     EdfError, PoolGrammar, PoolTable,
                     VarTable, build_dat_tables, build_table_chain,
-                    build_var_tables, chain_layout, classify, dat_layout,
+                    build_var_tables, chain_layout, chain_record_size,
+                    classify, dat_layout,
                     decrypt, encrypt, grammar_for, parse_dat_tables,
                     parse_table_chain, parse_var_tables, pool_record_size,
-                    read_grammar_json, verify_grammar, write_grammar_json)
+                    read_field, read_grammar_json, verify_grammar,
+                    write_field, write_grammar_json)
 
 
 class ContainerTests(unittest.TestCase):
@@ -409,6 +412,7 @@ class VariableRecordTests(unittest.TestCase):
         self.assertIsNotNone(grammar_for("UIHelp.edf"))
         self.assertIsNotNone(grammar_for("NDItem.edf"))
         self.assertIsNotNone(grammar_for("NDMsgMonster.edf"))
+        self.assertIsNotNone(grammar_for("NDQuest.edf"))
         # Everything else is still an opaque blob, and must stay one until
         # its grammar is derived rather than guessed.
         self.assertIsNone(grammar_for("Item.edf"))
@@ -819,6 +823,181 @@ class PooledStringTests(unittest.TestCase):
             self.assertEqual(grammar, self.G)
             self.assertEqual(doc["record_bytes"], pool_record_size(self.G))
             doc["slots"] = 19            # 88-byte record becomes 84
+            with open(json_path, "w", encoding="ascii", newline="\n") as f:
+                json.dump(doc, f)
+            with self.assertRaises(EdfError):
+                read_grammar_json(json_path)
+
+
+class PooledFieldTests(unittest.TestCase):
+    """BACKLOG #52: a pooled string that is one field of a fixed record.
+
+    The grammar under test is the real `NDQuest.edf` one -- a chain table of
+    32-byte names, then a chain table of `<u32 Id><u32 0><u32 len><u32 0>`
+    whose text sits in a pool behind the records rather than inside them.
+
+    The difference from PooledStringTests is the whole reason this kind
+    exists: there a record has a *list* of strings and needs a second CSV,
+    here a string is one field the record always has, so it is one column.
+    """
+
+    QUEST = EDF_TABLE_GRAMMARS["ndquest.edf"]
+    NAMES, TEXTS = QUEST[0], QUEST[1]
+
+    def _names(self, names):
+        out = struct.pack(CHAIN_HEADER, len(names), 32)
+        return out + b"".join(n.ljust(32, b"\x00") for n in names)
+
+    def _texts(self, records, rec_size=None):
+        """`records` is a list of (id, text)."""
+        if rec_size is None:
+            rec_size = chain_record_size(self.TEXTS)
+        out = struct.pack(CHAIN_HEADER, len(records), rec_size)
+        pool = b""
+        for rec_id, text in records:
+            out += struct.pack("<4I", rec_id, 0, len(text) + 1, 0)
+            pool += text + b"\x00"
+        return out + pool
+
+    def _payload(self, names, records):
+        return self._names(names) + self._texts(records)
+
+    def test_round_trip(self):
+        payload = self._payload(
+            [b"Flym Guard armor", b"WarBeast horn"],
+            [(0, b"The weapon was given out"), (1, b"Bring me five horns.")])
+        tables = parse_var_tables(payload, self.QUEST, "NDQuest.edf")
+        self.assertEqual(len(tables), 2)
+        self.assertIsInstance(tables[0], ChainTable)
+        self.assertIsInstance(tables[1], ChainTable)
+        self.assertEqual([r["Name"] for r in tables[0].rows],
+                         ["Flym Guard armor", "WarBeast horn"])
+        self.assertEqual(tables[1].rows[1]["Text"], "Bring me five horns.")
+        self.assertEqual(build_var_tables(tables), payload)
+
+    def test_a_pooled_field_is_one_column_not_a_second_file(self):
+        # The point of the kind. One row per record, columns in record order,
+        # and the text in the column its field occupies.
+        payload = self._payload([b"a"], [(0, b"hello"), (1, b"there")])
+        tables = parse_var_tables(payload, self.QUEST, "NDQuest.edf")
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = os.path.join(tmp, "t.csv")
+            tables[1].export_csv(csv_path)
+            self.assertFalse(os.path.exists(
+                os.path.join(tmp, "t.items.csv")))
+            with open(csv_path, encoding="ascii") as f:
+                lines = f.read().splitlines()
+            self.assertEqual(lines[0], "Id,Unknown1,Text,Unknown2")
+            self.assertEqual(lines[1:], ["0,0,hello,0", "1,0,there,0"])
+            back = ChainTable.from_csv(csv_path, self.TEXTS)
+            self.assertEqual(back.to_bytes(), self._texts(
+                [(0, b"hello"), (1, b"there")]))
+
+    def test_the_text_is_behind_the_records_not_inside_them(self):
+        # If it were inside, this payload and a VarTable's would be the same
+        # bytes. Both strings sit after both records.
+        payload = self._texts([(0, b"aa"), (1, b"bb")])
+        self.assertTrue(payload.endswith(b"aa" + b"\x00" + b"bb" + b"\x00"))
+        self.assertEqual(len(payload),
+                         CHAIN_HEADER_SIZE + 2 * 16 + len(b"aa" + b"\x00") * 2)
+
+    def test_the_length_is_derived_not_stored(self):
+        # It is not a column, so no hand edit can leave it disagreeing with
+        # its string -- and disagreeing here does not truncate that string, it
+        # moves every byte of the pool after it.
+        self.assertEqual([n for n, _ in self.TEXTS.fields],
+                         ["Id", "Unknown1", "Text", "Unknown2"])
+        payload = self._texts([(0, b"one"), (1, b"two")])
+        tables = parse_var_tables(self._names([]) + payload, self.QUEST,
+                                  "NDQuest.edf")
+        tables[1].rows[0]["Text"] = "a considerably longer replacement"
+        self.assertEqual(
+            build_var_tables(tables),
+            self._names([]) + self._texts(
+                [(0, b"a considerably longer replacement"), (1, b"two")]))
+
+    def test_refuses_a_record_size_the_header_disagrees_with(self):
+        # A chain header states the record size, so a grammar that does not
+        # add up to it is wrong about the file, not about a label.
+        payload = self._names([]) + self._texts([(0, b"x")], rec_size=12)
+        with self.assertRaises(EdfError):
+            parse_var_tables(payload, self.QUEST, "NDQuest.edf")
+
+    def test_refuses_a_string_that_is_not_one_terminated_run(self):
+        base = self._names([]) + self._texts([(0, b"abc")])
+        payload = bytearray(base)
+        payload[-1] = ord("d")                      # terminator gone
+        with self.assertRaises(EdfError):
+            parse_var_tables(bytes(payload), self.QUEST, "NDQuest.edf")
+        payload = bytearray(base)
+        payload[-2] = 0                             # NUL inside the run
+        with self.assertRaises(EdfError):
+            parse_var_tables(bytes(payload), self.QUEST, "NDQuest.edf")
+
+    def test_refuses_a_zero_length(self):
+        # Not even room for the terminator the length is supposed to count.
+        payload = bytearray(self._names([]) + self._texts([(0, b"x")]))
+        struct.pack_into("<I", payload, CHAIN_HEADER_SIZE * 2 + 8, 0)
+        with self.assertRaises(EdfError):
+            parse_var_tables(bytes(payload), self.QUEST, "NDQuest.edf")
+
+    def test_refuses_a_grammar_that_does_not_close(self):
+        payload = self._names([b"a"]) + self._texts([(0, b"x")])
+        with self.assertRaises(EdfError):
+            parse_var_tables(payload + b"\x00", self.QUEST, "NDQuest.edf")
+        with self.assertRaises(EdfError):
+            parse_var_tables(payload[:-1], self.QUEST, "NDQuest.edf")
+
+    def test_a_table_without_a_pooled_field_reads_no_pool(self):
+        # The names table is the same kind with no POOLSTR in it: it must stop
+        # on its last record and leave the rest of the payload alone.
+        payload = self._payload([b"only"], [(0, b"text")])
+        tables = parse_var_tables(payload, self.QUEST, "NDQuest.edf")
+        self.assertEqual(tables[0].to_bytes(), self._names([b"only"]))
+
+    def test_a_pooled_field_is_read_by_its_table_not_on_its_own(self):
+        # read_field/write_field cannot know where the pool starts, so they
+        # refuse loudly rather than reading four bytes of length as text.
+        with self.assertRaises(EdfError):
+            read_field(b"\x00" * 4, 0, POOLSTR, "somewhere")
+        with self.assertRaises(EdfError):
+            write_field("text", POOLSTR)
+
+    def test_verify_grammar_rejects_a_chain_grammar_that_cannot_work(self):
+        with self.assertRaises(EdfError):        # record would not be fixed
+            verify_grammar(ChainGrammar([("Id", "dword"), ("T", LPSTR)]))
+        with self.assertRaises(EdfError):        # columns must be distinct
+            verify_grammar(ChainGrammar([("Id", "dword"), ("Id", "dword")]))
+        verify_grammar(ChainGrammar([("Id", "dword"), ("T", POOLSTR)]))
+
+    def test_a_pooled_length_is_four_fixed_bytes_in_the_record(self):
+        # What the record holds is the length; the text is elsewhere. So the
+        # field is fixed-width, and the record size the header states adds up.
+        self.assertEqual(chain_record_size(self.TEXTS), 16)
+        self.assertEqual(chain_record_size(self.NAMES), 32)
+
+    def test_csv_rejects_reordered_columns(self):
+        payload = self._names([]) + self._texts([(0, b"x")])
+        tables = parse_var_tables(payload, self.QUEST, "NDQuest.edf")
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = os.path.join(tmp, "t.csv")
+            tables[1].export_csv(csv_path)
+            with open(csv_path, encoding="ascii") as f:
+                lines = f.read().splitlines()
+            with open(csv_path, "w", encoding="ascii", newline="\n") as f:
+                f.write("Id,Text,Unknown1,Unknown2\n" + lines[1] + "\n")
+            with self.assertRaises(ValueError):
+                ChainTable.from_csv(csv_path, self.TEXTS)
+
+    def test_grammar_json_catches_a_hand_edit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "t.json")
+            write_grammar_json(self.TEXTS, json_path)
+            grammar, doc = read_grammar_json(json_path)
+            self.assertEqual(grammar, self.TEXTS)
+            self.assertEqual(doc["kind"], "chain")
+            self.assertEqual(doc["record_bytes"], 16)
+            doc["record_bytes"] = 20
             with open(json_path, "w", encoding="ascii", newline="\n") as f:
                 json.dump(doc, f)
             with self.assertRaises(EdfError):
