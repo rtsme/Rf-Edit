@@ -90,9 +90,23 @@ _DIGITS = (1, 2, 4, 8, 16, 32, 64, 128)
 CHAIN_HEADER = "<2I"
 CHAIN_HEADER_SIZE = struct.calcsize(CHAIN_HEADER)
 
-# String widths the client's tables actually use: 64-byte names and 4-byte
-# item/quest codes. Tried widest first -- see infer_schema.
-EDF_STRING_WIDTHS = (64, 4)
+# String widths the client's tables actually use: 64-byte names, 32/16-byte
+# names (BACKLOG #50), and 4-byte item/quest codes. Tried widest first -- see
+# infer_schema.
+EDF_STRING_WIDTHS = (64, 32, 16, 4)
+
+# A 16/32-byte slot readily contains one real name among hundreds of
+# all-fill records -- "at least one text record" (the old rule) calls it a
+# string correctly, but most of its values are still fill and read as junk.
+# Measured over the 17 chain files (BACKLOG #50): the worst offender
+# (Quest.edf's item-name slot) has real text in 22.6% of its records, so
+# anything below that share still lets it through; 0.3 clears it with margin
+# and is a plateau -- 0.25 through 0.45 all land on materially the same slot
+# set. Below it, junk share is non-monotonic in the threshold (excluding the
+# worst slots first can raise the *average* among what's left before the
+# threshold finally clears them), so this is not a value to nudge without
+# re-running the measurement. See docs/knowledge/edf-payload-tables.md.
+EDF_MIN_TEXT_SHARE = 0.3
 
 # Guard rails for the chain walk. A real table's record is a handful of bytes
 # to a couple of kilobytes; anything past these is a misread header, and
@@ -263,7 +277,8 @@ def _table_from_records(data, count, rec_size, source):
         records = [data[i * rec_size:(i + 1) * rec_size] for i in range(count)]
         schema = infer_schema(records, rec_size,
                               string_widths=EDF_STRING_WIDTHS,
-                              allow_short_numbers=True)
+                              allow_short_numbers=True,
+                              min_text_share=EDF_MIN_TEXT_SHARE)
         schema_source = "inferred from records"
     verify_schema(schema, len(schema), rec_size)
 
