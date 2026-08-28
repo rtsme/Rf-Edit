@@ -709,6 +709,41 @@ BLOCK_COUNT_TYPES = ("ubyte", "uword", "udword")
 BLOCK_COLUMN = "Block"
 
 
+# A **pool** grammar: BACKLOG #52's third shape, the one NDMsgMonster.edf is.
+# The records are fixed-width and sit in an ordinary chain-format table,
+# header and all -- but each carries an array of byte *lengths* whose text is
+# not in the record. All the text lives in one pool after the table, in record
+# order, and a record's slots say how long each of its strings is.
+#
+# So a record and its strings are two regions of the file rather than one run,
+# which is why this cannot be a BlockGrammar: over there a block's items
+# follow the block. `lead` is the fixed fields in front of the slot array,
+# `slots` how many the array holds, and `count` the field after it saying how
+# many are used. Slots past that count are zero, which the reader checks
+# rather than assumes -- a nonzero one would mean the array is something else
+# and the rest of the walk is wrong.
+#
+# `item` is a name, not a field list: the pooled string is the whole item and
+# its length is the slot's, so there is nothing for a second field to be. It
+# carries LPSTR's contract -- the slot counts a trailing NUL the CSV does not
+# hold -- so, as everywhere else here, the length is derived on write and
+# never a column anyone has to keep in step.
+PoolGrammar = collections.namedtuple(
+    "PoolGrammar", "lead slot_type slots count item")
+
+# What a length slot or a used-slot count may be. Same reasoning as
+# BLOCK_COUNT_TYPES: anything wider is not a length or a count, and reading
+# one as the other would mean the shape was read wrong.
+POOL_SLOT_TYPES = BLOCK_COUNT_TYPES
+
+
+def pool_record_size(grammar):
+    """Bytes one pooled record occupies -- what its table header must say."""
+    return (sum(field_width(t) for _, t in grammar.lead)
+            + grammar.slots * field_size(grammar.slot_type)
+            + field_size(grammar.count))
+
+
 def _verify_fields(grammar, source):
     if not grammar:
         raise EdfError("%s: a grammar needs at least one field" % source)
@@ -724,6 +759,27 @@ def _verify_fields(grammar, source):
 
 def verify_grammar(grammar, source="grammar"):
     """Reject a grammar that could not produce a usable CSV. Returns it."""
+    if isinstance(grammar, PoolGrammar):
+        for what, ftype in (("slot", grammar.slot_type),
+                            ("string count", grammar.count)):
+            if ftype not in POOL_SLOT_TYPES:
+                raise EdfError("%s: %r is not a %s type (%s)"
+                               % (source, ftype, what,
+                                  ", ".join(POOL_SLOT_TYPES)))
+        if grammar.slots < 1:
+            raise EdfError("%s: a record with %d length slot(s) has nowhere "
+                           "to point at the pool" % (source, grammar.slots))
+        _verify_fields(grammar.lead, "%s record" % source)
+        for name, ftype in grammar.lead:
+            if field_width(ftype) is None:
+                raise EdfError("%s: field %s is variable-width, and a pooled "
+                               "record is not -- its size is stated in the "
+                               "table header" % (source, name))
+        if grammar.item == BLOCK_COLUMN:
+            raise EdfError("%s: the pooled string may not be called %r -- "
+                           "that column carries the record number"
+                           % (source, BLOCK_COLUMN))
+        return grammar
     if isinstance(grammar, BlockGrammar):
         if grammar.count not in BLOCK_COUNT_TYPES:
             raise EdfError("%s: %r is not an item-count type (%s)"
@@ -874,6 +930,33 @@ EDF_TABLE_GRAMMARS = {
            + [("Unknown%d" % i, "dword") for i in range(1, 16)]
            + [("Text", LPSTR)]]
     ),
+    # BACKLOG #52. The pooled shape, and the only file so far that is one: a
+    # chain-format table of 373 fixed 88-byte records -- `<i32 id>`, twenty
+    # `<u32>` length slots and a `<u32>` count of how many are used -- and
+    # then, after the table, every record's message text in one pool, in
+    # record order.
+    #
+    # **What makes this a derivation and not a guess is that the record table
+    # states each string's length separately, and all 1098 agree.** The pool
+    # holds 1098 NUL-terminated strings; the record counts sum to exactly
+    # 1098 across the 373 records; and for every one of those strings the
+    # slot's value is its length with the terminator counted. A boundary
+    # wrong anywhere would put one of the 1098 agreements out, and none is
+    # out. The record run is pinned twice over besides -- `Id` runs 0..372,
+    # matching the 373 the header declares, and the header's own 88-byte
+    # record size is exactly what these fields add up to, which the reader
+    # checks rather than assumes.
+    #
+    # Every slot at or past a record's count is zero, checked in all 373, so
+    # the twenty are one array and not three lengths plus seventeen other
+    # fields: 88 bytes is `int id; int len[20]; int count;`. Records 0-6 are
+    # the seven that use none of it, all fields zero. Which of a monster's
+    # three messages is which the file does not say, so they keep file order
+    # and no names.
+    "ndmsgmonster.edf": [
+        PoolGrammar(lead=[("Id", "dword")], slot_type="udword", slots=20,
+                    count="udword", item="Text"),
+    ],
 }
 
 
@@ -932,6 +1015,37 @@ def _read_csv(path, grammar, lead=None):
                                      % (where, i + 2, name, exc))
             rows.append(row)
     return leads, rows
+
+
+def _items_path(path):
+    """Where a two-region table's item rows live, given its main CSV path."""
+    base, ext = os.path.splitext(path)
+    return base + ".items" + (ext or ".csv")
+
+
+def _group_items(leads, items, nrows, path, ipath):
+    """Bucket item rows by their `Block` column, keeping them in file order.
+
+    Item order inside a block is byte order, so the rows are written back in
+    the order they are read: they must stay grouped and in block order, and
+    saying so is better than quietly reshuffling the payload.
+    """
+    where = os.path.basename(ipath)
+    groups = [[] for _ in range(nrows)]
+    last = -1
+    for i, (block, item) in enumerate(zip(leads, items)):
+        if not 0 <= block < nrows:
+            raise ValueError("%s line %d: block %d, but %s has %d block(s)"
+                             % (where, i + 2, block,
+                                os.path.basename(path), nrows))
+        if block < last:
+            raise ValueError(
+                "%s line %d: block %d after block %d -- item rows are "
+                "written back in the order they appear, so they must stay "
+                "grouped and in block order" % (where, i + 2, block, last))
+        last = block
+        groups[block].append(item)
+    return groups
 
 
 class VarTable(object):
@@ -1034,8 +1148,7 @@ class BlockTable(object):
     @staticmethod
     def items_path(path):
         """Where the item rows live, given the block CSV's path."""
-        base, ext = os.path.splitext(path)
-        return base + ".items" + (ext or ".csv")
+        return _items_path(path)
 
     @classmethod
     def parse(cls, data, offset, grammar, source):
@@ -1123,24 +1236,200 @@ class BlockTable(object):
         _leads, rows = _read_csv(path, self.grammar.block)
         ipath = self.items_path(path)
         leads, items = _read_csv(ipath, self.grammar.item, lead=BLOCK_COLUMN)
-        where = os.path.basename(ipath)
-        groups = [[] for _ in rows]
-        last = -1
-        for i, (block, item) in enumerate(zip(leads, items)):
-            if not 0 <= block < len(rows):
-                raise ValueError("%s line %d: block %d, but %s has %d block(s)"
-                                 % (where, i + 2, block,
-                                    os.path.basename(path), len(rows)))
-            if block < last:
-                raise ValueError(
-                    "%s line %d: block %d after block %d -- item rows are "
-                    "written back in the order they appear, so they must stay "
-                    "grouped and in block order"
-                    % (where, i + 2, block, last))
-            last = block
-            groups[block].append(item)
         self.rows = rows
-        self.items = groups
+        self.items = _group_items(leads, items, len(rows), path, ipath)
+        return rows
+
+
+class PoolTable(object):
+    """A chain-format table whose strings live in a pool after the records.
+
+    `<u32 record_count><u32 record_size>`, then the fixed records, then every
+    record's strings end to end -- record order, and slot order inside a
+    record. Two regions, so two CSVs, joined by the same `Block` column
+    BlockTable uses; here a block is a record.
+
+    The record size in the header is not taken on trust: it has to equal what
+    the grammar's own fields add up to. That is a check the count-only formats
+    cannot make at all -- this shape states its record size, so a grammar that
+    disagrees with it is wrong about the file, not about a labelling detail.
+    """
+
+    def __init__(self, grammar, rows, items, source=None, grammar_source=None):
+        self.grammar = verify_grammar(grammar, source or "grammar")
+        if len(rows) != len(items):
+            raise EdfError("%s: %d record(s) but %d string list(s)"
+                           % (source or "table", len(rows), len(items)))
+        self.rows = rows
+        self.items = items
+        self.source = source
+        self.grammar_source = grammar_source
+
+    @staticmethod
+    def items_path(path):
+        """Where the string rows live, given the record CSV's path."""
+        return _items_path(path)
+
+    def _item_fields(self):
+        """The strings CSV's grammar.
+
+        LPSTR, because the contract is LPSTR's exactly -- text with a
+        terminator counted in a length that is derived, never typed. The only
+        difference is where that length is written, and the CSV does not hold
+        it either way.
+        """
+        return [(self.grammar.item, LPSTR)]
+
+    @classmethod
+    def parse(cls, data, offset, grammar, source):
+        """Read the table at `offset` and the string pool after it.
+
+        Returns the table and the offset just past the pool.
+        """
+        verify_grammar(grammar, source)
+        if offset + CHAIN_HEADER_SIZE > len(data):
+            raise EdfError("%s: %d byte(s) left, too few for an 8-byte table "
+                           "header" % (source, len(data) - offset))
+        count, rec_size = struct.unpack_from(CHAIN_HEADER, data, offset)
+        pos = offset + CHAIN_HEADER_SIZE
+        if count > MAX_RECORD_COUNT:
+            raise EdfError("%s: reads as %d records, which is not a record "
+                           "count" % (source, count))
+        want = pool_record_size(grammar)
+        if rec_size != want:
+            raise EdfError("%s: the header says %d-byte records and the "
+                           "grammar describes %d -- the grammar does not fit "
+                           "this file" % (source, rec_size, want))
+        rows, lengths = [], []
+        for i in range(count):
+            row = {}
+            for name, ftype in grammar.lead:
+                row[name], pos = read_field(
+                    data, pos, ftype,
+                    "%s record %d field %s" % (source, i, name))
+            slots = []
+            for k in range(grammar.slots):
+                value, pos = read_field(
+                    data, pos, grammar.slot_type,
+                    "%s record %d length slot %d" % (source, i, k))
+                slots.append(value)
+            n, pos = read_field(data, pos, grammar.count,
+                                "%s record %d string count" % (source, i))
+            if n > grammar.slots:
+                raise EdfError("%s record %d: reads as %d string(s), more "
+                               "than the %d slot(s) the record holds"
+                               % (source, i, n, grammar.slots))
+            spare = [k for k in range(n, grammar.slots) if slots[k]]
+            if spare:
+                raise EdfError("%s record %d: it uses %d of its %d slot(s), "
+                               "but unused slot %d holds %d rather than zero "
+                               "-- these are not lengths, and the rest of the "
+                               "walk is wrong"
+                               % (source, i, n, grammar.slots, spare[0],
+                                  slots[spare[0]]))
+            rows.append(row)
+            lengths.append(slots[:n])
+        items = []
+        for i, lens in enumerate(lengths):
+            group = []
+            for k, length in enumerate(lens):
+                where = "%s record %d string %d" % (source, i, k)
+                if length < 1:
+                    raise EdfError("%s: its slot says %d bytes, too few for "
+                                   "even a terminator" % (where, length))
+                if pos + length > len(data):
+                    raise EdfError("%s: its slot says %d bytes, %d past the "
+                                   "end of the payload"
+                                   % (where, length, pos + length - len(data)))
+                blob = data[pos:pos + length]
+                # The same contract LPSTR reads, and it does the same work: a
+                # pooled string is the one thing here that can say on its own
+                # whether the walk is still in step.
+                if not blob.endswith(b"\x00") or b"\x00" in blob[:-1]:
+                    raise EdfError(
+                        "%s: the %d bytes its slot points at are not one "
+                        "NUL-terminated run (%r) -- the grammar does not fit "
+                        "this file" % (where, length, blob[:32]))
+                group.append({grammar.item: blob[:-1].decode("latin-1")})
+                pos += length
+            items.append(group)
+        return cls(grammar, rows, items, source=source,
+                   grammar_source="hand-derived (EDF_TABLE_GRAMMARS)"), pos
+
+    def to_bytes(self):
+        where = self.source or "table"
+        g = self.grammar
+        out = bytearray(struct.pack(CHAIN_HEADER, len(self.rows),
+                                    pool_record_size(g)))
+        pool = bytearray()
+        for i, (row, group) in enumerate(zip(self.rows, self.items)):
+            if len(group) > g.slots:
+                raise EdfError("%s record %d: %d string(s), more than the %d "
+                               "slot(s) the record holds"
+                               % (where, i, len(group), g.slots))
+            for name, ftype in g.lead:
+                try:
+                    out += write_field(row[name], ftype)
+                except ValueError as exc:
+                    raise EdfError("%s record %d field %s: %s"
+                                   % (where, i, name, exc))
+            raws = []
+            for j, item in enumerate(group):
+                try:
+                    raw = str(item[g.item]).encode("latin-1")
+                except ValueError:
+                    raise EdfError("%s record %d string %d: contains "
+                                   "characters this file's encoding can't "
+                                   "store (latin-1 only)" % (where, i, j))
+                if b"\x00" in raw:
+                    raise EdfError("%s record %d string %d: must not contain "
+                                   "a NUL byte -- the terminator is written "
+                                   "for you" % (where, i, j))
+                raws.append(raw)
+            # The lengths are written from the strings, never carried: a slot
+            # disagreeing with its string would not truncate that string, it
+            # would move every byte of the pool after it.
+            for k in range(g.slots):
+                length = len(raws[k]) + 1 if k < len(raws) else 0
+                try:
+                    out += write_field(length, g.slot_type)
+                except (ValueError, struct.error):
+                    raise EdfError("%s record %d string %d: %d bytes is more "
+                                   "than this file's %s length slot can hold"
+                                   % (where, i, k, length, g.slot_type))
+            try:
+                out += write_field(len(group), g.count)
+            except (ValueError, struct.error):
+                raise EdfError("%s record %d: %d string(s) is more than this "
+                               "file's %s count can hold"
+                               % (where, i, len(group), g.count))
+            for raw in raws:
+                pool += raw + b"\x00"
+        return bytes(out + pool)
+
+    @classmethod
+    def from_csv(cls, csv_path, grammar):
+        t = cls(grammar, [], [], source=os.path.basename(csv_path),
+                grammar_source=os.path.basename(csv_path))
+        t.import_csv(csv_path)
+        return t
+
+    def export_csv(self, path):
+        names = [n for n, _ in self.grammar.lead]
+        _write_csv(path, names,
+                   ([escape_text(str(row[n])) for n in names]
+                    for row in self.rows))
+        item = self.grammar.item
+        _write_csv(self.items_path(path), [BLOCK_COLUMN, item],
+                   ([str(i), escape_text(str(row[item]))]
+                    for i, group in enumerate(self.items) for row in group))
+
+    def import_csv(self, path):
+        _leads, rows = _read_csv(path, self.grammar.lead)
+        ipath = self.items_path(path)
+        leads, items = _read_csv(ipath, self._item_fields(), lead=BLOCK_COLUMN)
+        self.rows = rows
+        self.items = _group_items(leads, items, len(rows), path, ipath)
         return rows
 
 
@@ -1154,7 +1443,12 @@ def parse_var_tables(payload, grammars, source="EDF payload"):
     tables = []
     offset = 0
     for i, grammar in enumerate(grammars):
-        reader = BlockTable if isinstance(grammar, BlockGrammar) else VarTable
+        if isinstance(grammar, PoolGrammar):
+            reader = PoolTable
+        elif isinstance(grammar, BlockGrammar):
+            reader = BlockTable
+        else:
+            reader = VarTable
         table, offset = reader.parse(
             payload, offset, grammar, "%s#%d" % (source, i))
         tables.append(table)
@@ -1195,7 +1489,15 @@ def write_grammar_json(grammar, path, table_name="", source=""):
     same reason -- there are more numbers to get wrong, not fewer.
     """
     doc = {"table": table_name, "grammar_source": source}
-    if isinstance(grammar, BlockGrammar):
+    if isinstance(grammar, PoolGrammar):
+        doc["kind"] = "pool"
+        doc["slot_type"] = grammar.slot_type
+        doc["slots"] = grammar.slots
+        doc["string_count_type"] = grammar.count
+        doc["item"] = grammar.item
+        doc["record_bytes"] = pool_record_size(grammar)
+        doc.update(_layout_doc(grammar.lead))
+    elif isinstance(grammar, BlockGrammar):
         doc["kind"] = "block"
         doc["item_count_type"] = grammar.count
         doc.update(_layout_doc(grammar.block))
@@ -1230,6 +1532,17 @@ def read_grammar_json(path):
     with open(path, "r", encoding="ascii") as f:
         doc = json.load(f)
     where = os.path.basename(path)
+    if doc.get("kind") == "pool":
+        grammar = PoolGrammar(_read_layout(doc, where), doc["slot_type"],
+                              doc["slots"], doc["string_count_type"],
+                              doc["item"])
+        verify_grammar(grammar, where)
+        if pool_record_size(grammar) != doc["record_bytes"]:
+            raise EdfError("%s is inconsistent: the grammar describes a "
+                           "%d-byte record, the header says %d"
+                           % (where, pool_record_size(grammar),
+                              doc["record_bytes"]))
+        return grammar, doc
     if doc.get("kind") == "block":
         grammar = BlockGrammar(_read_layout(doc, where),
                                doc["item_count_type"],
@@ -1254,7 +1567,7 @@ def _csv_round_trip(tables, name, tmp, build):
         csv_path = os.path.join(tmp, "%02d.csv" % i)
         layout_path = os.path.join(tmp, "%02d.json" % i)
         table.export_csv(csv_path)
-        if isinstance(table, (VarTable, BlockTable)):
+        if isinstance(table, (VarTable, BlockTable, PoolTable)):
             write_grammar_json(table.grammar, layout_path,
                                table_name="%s#%d" % (name, i),
                                source=table.grammar_source)

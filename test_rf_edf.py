@@ -17,15 +17,15 @@ import tempfile
 import unittest
 
 from rf_dat import SchemaError, Table, infer_schema
-from rf_edf import (CHAIN_HEADER, DAT_HEADER, EDF_MIN_TEXT_SHARE,
+from rf_edf import (CHAIN_HEADER, CHAIN_HEADER_SIZE, DAT_HEADER, EDF_MIN_TEXT_SHARE,
                     EDF_STRING_WIDTHS, EDF_TABLE_GRAMMARS, KEY_LENGTH, MAGIC,
                     LPSTR, MAX_WPSTR, WPSTR, BlockGrammar, BlockTable,
-                    EdfError,
+                    EdfError, PoolGrammar, PoolTable,
                     VarTable, build_dat_tables, build_table_chain,
                     build_var_tables, chain_layout, classify, dat_layout,
                     decrypt, encrypt, grammar_for, parse_dat_tables,
-                    parse_table_chain, parse_var_tables, read_grammar_json,
-                    verify_grammar, write_grammar_json)
+                    parse_table_chain, parse_var_tables, pool_record_size,
+                    read_grammar_json, verify_grammar, write_grammar_json)
 
 
 class ContainerTests(unittest.TestCase):
@@ -408,6 +408,7 @@ class VariableRecordTests(unittest.TestCase):
         self.assertIsNotNone(grammar_for("Hint.edf"))
         self.assertIsNotNone(grammar_for("UIHelp.edf"))
         self.assertIsNotNone(grammar_for("NDItem.edf"))
+        self.assertIsNotNone(grammar_for("NDMsgMonster.edf"))
         # Everything else is still an opaque blob, and must stay one until
         # its grammar is derived rather than guessed.
         self.assertIsNone(grammar_for("Item.edf"))
@@ -659,6 +660,169 @@ class BlockRecordTests(unittest.TestCase):
         self.assertEqual(len(grammars), 55)
         self.assertEqual(len(set(id(g) for g in grammars)), 1)
         self.assertIsInstance(grammars[0], BlockGrammar)
+
+
+class PooledStringTests(unittest.TestCase):
+    """BACKLOG #52: fixed records whose text lives in a pool after them.
+
+    The grammar under test is the real `NDMsgMonster.edf` one -- an `Id`,
+    twenty `<u32>` length slots, a `<u32>` count of how many are used, and the
+    strings themselves end to end after the last record.
+    """
+
+    MONSTER = EDF_TABLE_GRAMMARS["ndmsgmonster.edf"]
+    G = MONSTER[0]
+
+    def _payload(self, records, slots=None, rec_size=None):
+        """`records` is a list of (id, [text, ...])."""
+        g = self.G
+        slots = g.slots if slots is None else slots
+        if rec_size is None:
+            rec_size = pool_record_size(g)
+        out = struct.pack(CHAIN_HEADER, len(records), rec_size)
+        pool = b""
+        for rec_id, texts in records:
+            lens = [len(t) + 1 for t in texts]
+            lens += [0] * (slots - len(lens))
+            out += struct.pack("<i", rec_id)
+            out += struct.pack("<%dI" % slots, *lens)
+            out += struct.pack("<I", len(texts))
+            pool += b"".join(t + b"\x00" for t in texts)
+        return out + pool
+
+    def test_round_trip(self):
+        payload = self._payload([
+            (0, []),
+            (1, [b"Krr! Scratch you...", b"Oh mommy... ", b"Don't hit me!"]),
+            (2, [b"For Crawler Kingdom!"]),
+        ])
+        tables = parse_var_tables(payload, self.MONSTER, "NDMsgMonster.edf")
+        self.assertEqual(len(tables), 1)
+        self.assertIsInstance(tables[0], PoolTable)
+        self.assertEqual([r["Id"] for r in tables[0].rows], [0, 1, 2])
+        self.assertEqual([len(g) for g in tables[0].items], [0, 3, 1])
+        self.assertEqual(tables[0].items[1][1]["Text"], "Oh mommy... ")
+        self.assertEqual(build_var_tables(tables), payload)
+
+    def test_the_strings_are_one_pool_after_every_record(self):
+        # The shape's whole point: a record's text is not next to the record.
+        # If it were, this payload and a BlockTable's would be the same bytes.
+        payload = self._payload([(0, [b"aa"]), (1, [b"bb"])])
+        self.assertTrue(payload.endswith(b"aa\x00bb\x00"))
+        tables = parse_var_tables(payload, self.MONSTER, "NDMsgMonster.edf")
+        self.assertEqual(tables[0].items[0][0]["Text"], "aa")
+        self.assertEqual(tables[0].items[1][0]["Text"], "bb")
+
+    def test_lengths_and_count_are_derived_not_stored(self):
+        # Neither is a column, so no hand edit can leave them disagreeing with
+        # the text -- and disagreeing here does not truncate one string, it
+        # moves every byte of the pool after it.
+        self.assertEqual([n for n, _ in self.G.lead], ["Id"])
+        payload = self._payload([(7, [b"one"])])
+        tables = parse_var_tables(payload, self.MONSTER, "NDMsgMonster.edf")
+        tables[0].items[0][0]["Text"] = "a considerably longer replacement"
+        tables[0].items[0].append({"Text": "two"})
+        self.assertEqual(
+            build_var_tables(tables),
+            self._payload([(7, [b"a considerably longer replacement",
+                                b"two"])]))
+
+    def test_refuses_a_record_size_the_header_disagrees_with(self):
+        # The count-only formats have nothing to check a grammar against.
+        # This one states its record size, so a grammar that does not add up
+        # to it is wrong about the file.
+        payload = self._payload([(0, [b"x"])], rec_size=84)
+        with self.assertRaises(EdfError):
+            parse_var_tables(payload, self.MONSTER, "NDMsgMonster.edf")
+
+    def test_refuses_a_used_slot_past_the_count(self):
+        # A value in a slot the record says it does not use means the array is
+        # something other than lengths, and everything after it is wrong.
+        payload = bytearray(self._payload([(0, [b"x"])]))
+        struct.pack_into("<I", payload, CHAIN_HEADER_SIZE + 4 + 4, 9)
+        with self.assertRaises(EdfError):
+            parse_var_tables(bytes(payload), self.MONSTER, "NDMsgMonster.edf")
+
+    def test_refuses_a_string_that_is_not_one_terminated_run(self):
+        payload = bytearray(self._payload([(0, [b"abc"])]))
+        payload[-1] = ord("d")                      # terminator gone
+        with self.assertRaises(EdfError):
+            parse_var_tables(bytes(payload), self.MONSTER, "NDMsgMonster.edf")
+        payload = bytearray(self._payload([(0, [b"abc"])]))
+        payload[-2] = 0                             # NUL inside the run
+        with self.assertRaises(EdfError):
+            parse_var_tables(bytes(payload), self.MONSTER, "NDMsgMonster.edf")
+
+    def test_refuses_a_grammar_that_does_not_close(self):
+        payload = self._payload([(0, [b"x"])])
+        with self.assertRaises(EdfError):
+            parse_var_tables(payload + b"\x00", self.MONSTER,
+                             "NDMsgMonster.edf")
+        with self.assertRaises(EdfError):
+            parse_var_tables(payload[:-1], self.MONSTER, "NDMsgMonster.edf")
+
+    def test_refuses_more_strings_than_the_record_has_slots(self):
+        payload = self._payload([(0, [b"x"])])
+        tables = parse_var_tables(payload, self.MONSTER, "NDMsgMonster.edf")
+        tables[0].items[0] = [{"Text": "x"}] * (self.G.slots + 1)
+        with self.assertRaises(EdfError):
+            build_var_tables(tables)
+
+    def test_csv_round_trip_writes_records_and_strings(self):
+        payload = self._payload([(0, []),
+                                 (1, [b"first", b"second"]),
+                                 (2, [b"third"])])
+        tables = parse_var_tables(payload, self.MONSTER, "NDMsgMonster.edf")
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = os.path.join(tmp, "t.csv")
+            tables[0].export_csv(csv_path)
+            with open(PoolTable.items_path(csv_path), encoding="ascii") as f:
+                lines = f.read().splitlines()
+            self.assertEqual(lines[0], "Block,Text")
+            self.assertEqual(lines[1:], ["1,first", "1,second", "2,third"])
+            back = PoolTable.from_csv(csv_path, self.G)
+            self.assertEqual(back.to_bytes(), payload)
+
+    def test_items_csv_rejects_rows_out_of_record_order(self):
+        payload = self._payload([(0, [b"x"]), (1, [b"y"])])
+        tables = parse_var_tables(payload, self.MONSTER, "NDMsgMonster.edf")
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = os.path.join(tmp, "t.csv")
+            tables[0].export_csv(csv_path)
+            ipath = PoolTable.items_path(csv_path)
+            with open(ipath, encoding="ascii") as f:
+                lines = f.read().splitlines()
+            with open(ipath, "w", encoding="ascii", newline="\n") as f:
+                f.write("\n".join([lines[0], lines[2], lines[1]]) + "\n")
+            with self.assertRaises(ValueError):
+                PoolTable.from_csv(csv_path, self.G)
+
+    def test_verify_grammar_rejects_a_pool_grammar_that_cannot_work(self):
+        good = dict(lead=[("Id", "dword")], slot_type="udword", slots=20,
+                    count="udword", item="Text")
+        with self.assertRaises(EdfError):        # slot too wide to be a length
+            verify_grammar(PoolGrammar(**dict(good, slot_type="qword")))
+        with self.assertRaises(EdfError):        # no slots to point with
+            verify_grammar(PoolGrammar(**dict(good, slots=0)))
+        with self.assertRaises(EdfError):        # Block is the join column
+            verify_grammar(PoolGrammar(**dict(good, item="Block")))
+        with self.assertRaises(EdfError):        # record would not be fixed
+            verify_grammar(PoolGrammar(**dict(
+                good, lead=[("Id", "dword"), ("Name", LPSTR)])))
+        verify_grammar(PoolGrammar(**good))
+
+    def test_grammar_json_catches_a_hand_edit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "t.json")
+            write_grammar_json(self.G, json_path)
+            grammar, doc = read_grammar_json(json_path)
+            self.assertEqual(grammar, self.G)
+            self.assertEqual(doc["record_bytes"], pool_record_size(self.G))
+            doc["slots"] = 19            # 88-byte record becomes 84
+            with open(json_path, "w", encoding="ascii", newline="\n") as f:
+                json.dump(doc, f)
+            with self.assertRaises(EdfError):
+                read_grammar_json(json_path)
 
 
 if __name__ == "__main__":
