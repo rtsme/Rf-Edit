@@ -378,7 +378,7 @@ def auto_schema(field_count, rec_size):
     return schema
 
 
-def _looks_like_string_slot(records, pos, width):
+def _looks_like_string_slot(records, pos, width, ascii_only=False):
     """True if [pos, pos+width) behaves like a null-padded string in every record.
 
     That means: printable-or-high bytes up to the first NUL, then nothing but
@@ -389,6 +389,13 @@ def _looks_like_string_slot(records, pos, width):
     valid as an empty string or as zeroed numbers, and calling it a string on
     no evidence would hide editable numeric fields behind a blank text column.
     At least one record has to actually contain text.
+
+    `ascii_only` additionally rejects high bytes. It exists for narrow slots
+    (see infer_schema): in four bytes, "no control characters" is nearly no
+    evidence at all, and the client's -1 sentinel -- four 0xFF bytes with no
+    terminator -- passes the relaxed test in every record. Requiring plain
+    printable ASCII is the difference between finding item codes and labelling
+    every empty slot in the file as text.
     """
     saw_text = False
     for rec in records:
@@ -400,37 +407,79 @@ def _looks_like_string_slot(records, pos, width):
             return False                      # data after the terminator
         if any(b < 0x20 for b in head):
             return False                      # control bytes: not text
+        if ascii_only and any(b > 0x7e for b in head):
+            return False                      # high bytes: a sentinel, not a code
         if head:
             saw_text = True
     return saw_text
 
 
-def infer_schema(records, rec_size, width=64):
+# Below this width a slot carries too little evidence to be called text on the
+# relaxed rule -- see _looks_like_string_slot's `ascii_only`.
+NARROW_STRING_WIDTH = 8
+
+
+def infer_schema(records, rec_size, width=64, string_widths=None,
+                 allow_short_numbers=False):
     """Work out a layout from the record bytes themselves.
 
     For the thousands of per-map tables there is no reference schema anywhere,
     so the alternative to this is treating them as opaque. The rule is simple
-    and evidence-driven: walk the record, and take a 64-byte string slot
-    wherever the bytes across every record actually behave like one, otherwise
-    take a 4-byte number.
+    and evidence-driven: walk the record, and take a string slot wherever the
+    bytes across every record actually behave like one, otherwise take a
+    4-byte number.
 
     Byte-exactness is guaranteed either way -- both readings re-encode to the
     same bytes -- so what this buys is *labels*: text shows up as text instead
     of sixteen meaningless integers.
+
+    Two knobs exist for the client's `.edf` tables (BACKLOG #44), both off by
+    default so server `.dat` inference keeps its historical behaviour:
+
+    `string_widths` offers more than one string width. Candidates are tried
+    **widest first**: a 64-byte name would otherwise be chopped into a 4-byte
+    "code" by its own first four characters, since those carry no terminator
+    and so pass the narrow test trivially. A genuine 4-byte code slot can
+    never be mistaken for a 64-byte one in the other direction -- whatever
+    follows it inside the 64-byte window puts data after the terminator.
+
+    Candidates narrower than `NARROW_STRING_WIDTH` are also held to plain
+    printable ASCII, because the relaxed rule that works on a 64-byte name
+    slot accepts almost anything in four bytes. Measured over the 17 chain
+    files, that one condition cuts the share of "string" values that are
+    neither text nor empty from 56% to 13%.
+
+    `allow_short_numbers` lets a record end in a 2- or 1-byte number. Client
+    record sizes are not all multiples of four (`Character.edf`'s fifth table
+    is 46 bytes), and without this such a table cannot be laid out at all.
     """
     fields = [("Index", "dword")]
     pos = 4
     nstr = nnum = 0
+    widths = tuple(sorted(set(string_widths or (width,)), reverse=True))
     while pos < rec_size:
-        if pos + width <= rec_size and _looks_like_string_slot(records, pos, width):
+        slot = next((w for w in widths
+                     if pos + w <= rec_size
+                     and _looks_like_string_slot(
+                         records, pos, w, ascii_only=w < NARROW_STRING_WIDTH)),
+                    None)
+        if slot is not None:
             nstr += 1
             fields.append(("Text%d" % nstr if nstr > 1 else "Code",
-                           "string[%d]" % width))
-            pos += width
+                           "string[%d]" % slot))
+            pos += slot
         elif pos + 4 <= rec_size:
             nnum += 1
             fields.append(("Val%d" % nnum, "dword"))
             pos += 4
+        elif allow_short_numbers and pos + 2 <= rec_size:
+            nnum += 1
+            fields.append(("Val%d" % nnum, "word"))
+            pos += 2
+        elif allow_short_numbers and pos + 1 <= rec_size:
+            nnum += 1
+            fields.append(("Val%d" % nnum, "byte"))
+            pos += 1
         else:
             raise SchemaError(
                 "record size %d leaves %d trailing byte(s) that fit no field"
