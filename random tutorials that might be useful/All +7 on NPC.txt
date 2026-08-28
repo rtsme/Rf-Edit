@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_all7onnpc.md — fidelity preserved from original]
+
 Find the correct NPC via ndstore.dat
 Go to store.dat and storelist.dat and change the $FFFFFFF found in the column (DWORD;) (ItemUpCode) to 70000000
 (slot number)(number of talismans)
@@ -24,3 +26,4 @@ Example of a +3 item with 7 slots:
 7FFFF333.  ← talisman numbers
 ↑.   ↑→ number of empty slots
 Number of slots
+

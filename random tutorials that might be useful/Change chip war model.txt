@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changechipwarmodel.md — fidelity preserved from original]
+
 To change the chip's model there are two ways:
 
 First way, which is what I do:
@@ -37,3 +39,4 @@ StoneMasterRace2 = 2
 Change the StoneMonsterCode for each race to the new mob's model code and restart the server.
 
 ##############################################
+

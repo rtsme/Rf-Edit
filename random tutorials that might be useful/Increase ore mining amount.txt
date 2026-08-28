@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_increaseoreminingamount.md — fidelity preserved from original]
+
 In the file: NewHolySystem.ini, in the server/RF_Bin/Initialize/ folder.
 
 At the end of the file it says:
@@ -115,3 +117,4 @@ No drying up maps
 No breaking the economy
 
 ---
+

@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_removexpfromchatininternalmode.md — fidelity preserved from original]
+
 Open your zoneserver.exe using a hex editor
 (HxD)
 
@@ -12,3 +14,4 @@ Search for the offset:
 000215CE9
 
 Change the value from 74 to 75.
+

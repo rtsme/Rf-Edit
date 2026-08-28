@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changemaxleveloldmethod.md — fidelity preserved from original]
+
 ###############################################
 Side: CLIENT
 ###############################################
@@ -81,3 +83,4 @@ This matters because if a player modifies their client files and you forgot to e
 Editing this means even if they level up, it won't be saved server-side — it will only save what's set in your database, at most.
 
 ###############################################
+

@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_additemtocashshop.md — fidelity preserved from original]
+
 Open item.edf
 Navigate to the item you want to add to the cash shop.
 Find the column "IsCashItem"
@@ -63,3 +65,4 @@ Now run the code in SQL.
 You can close SQL Studio.
 Now copy the edited cash shop files to your server's script folder and to the client's DataTable folders.
 Tutorial tested and created by Brendel 05-06-2021 (01:42 am) — server 2.2.3.2
+

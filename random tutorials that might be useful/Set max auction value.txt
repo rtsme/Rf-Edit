@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_setmaxauctionvalue.md — fidelity preserved from original]
+
 To set the maximum auction value, use the query below.
 
 Tested only on server 2232.
@@ -24,3 +26,4 @@ GO
 -- 3. Enable the constraint check
 ALTER TABLE [dbo].[tbl_utsellinfo] CHECK CONSTRAINT [CK_tbl_utsellinfo]
 GO
+

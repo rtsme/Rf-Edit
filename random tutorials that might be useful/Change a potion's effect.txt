@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changeapotionseffect.md — fidelity preserved from original]
+
 Open the file PotionItemEffect.strs using Structorian.
 
 Open the file PotionItemEffect.dat, located in the server's RF_Bin/Script/..... folder.
@@ -70,3 +72,4 @@ enum PotEff
 }
 
 In the column: nTempEffectType you'll find the effect number the capsule is using, which is 57.
+

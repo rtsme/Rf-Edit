@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changenpclocation.md — fidelity preserved from original]
+
 To move an NPC's location
 - open NDstore.strs and .dat (to find the NPC's number)
 - open StoreList.strs and .dat
@@ -56,3 +58,4 @@ sd03002    -25    -25    -25        25    25    25    -node_tm
    -4940.000000 174.000000 9825.000000 1.000000
 
 That's how your code will look — now save, restart the server, and it will be changed.
+

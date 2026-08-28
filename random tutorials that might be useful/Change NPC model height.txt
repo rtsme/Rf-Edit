@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changenpcmodelheight.md — fidelity preserved from original]
+
 Open ndstore using Structorian and find the NPC's index.
 In this example, the index:
 162 Temple of Honor Bellato
@@ -72,3 +74,4 @@ NEUTRALA_EVENTNPC_002.bn acc
 NEUTRALA_EVENTNPC_002.BBX acc
 
 Done — now the NPC's name will sit properly above it instead of floating up high like before.
+

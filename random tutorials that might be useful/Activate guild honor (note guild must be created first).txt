@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_activateguildhonornoteguildmustbecreatedfirst.md — fidelity preserved from original]
+
 Use RF_World
 GO
 
@@ -25,3 +27,4 @@ INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES
 INSERT INTO [dbo].[tbl_honor_guild] (race, guildserial, taxrate, IsNext ) VALUES (@ar2, @a2, 15, 0)
 END
 GO
+

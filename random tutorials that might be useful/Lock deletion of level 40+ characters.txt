@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_lockdeletionoflevel40characters.md — fidelity preserved from original]
+
 To block deletion of characters level 40+, meaning no one can delete a character that is level 40 or above, use this query.
 
 With this, only characters level 40 and below can be deleted — i.e.: 39, 38, 37, 36...
@@ -120,3 +122,4 @@ BEGIN
     END CATCH
 END
 GO
+

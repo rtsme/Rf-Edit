@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changeanimuslevelgainedonclasschange.md — fidelity preserved from original]
+
 Change the animus level gained when switching class at lv40
 
 Open your client's character.edf using Structorian.
@@ -41,3 +43,4 @@ IT IS VERY IMPORTANT THAT IF YOU'RE EDITING PAIMON, YOU TAKE THE XP FROM THE PAI
 IF YOU'RE EDITING ISIS, TAKE THE XP FROM ISIS IN STRUCTORIAN, AND SO ON.
 
 DO NOT TAKE THE XP FROM ONE ANIMUS AND PASTE IT INTO ANOTHER, SINCE EACH ANIMUS HAS DIFFERENT XP.
+

@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changeitempickupspeed.md — fidelity preserved from original]
+
 Open zoneguard.exe using Structorian
 Open the System option:
 You'll see:
@@ -21,3 +23,4 @@ LootDelay: 400
 Note: DO NOT lower it below 300, because you'll get a lot of annoying "Item Routing Failed" errors on the player's screen — if 10 items drop on the ground, the player will probably only manage to grab about 7 quickly and will likely get the pickup error and lose around 3 items. So I recommend keeping LootDelay at 400, True Client Value at 400, and Take Delay MS at 300.
 
 If you don't mind and want it super fast at 300 anyway, you'll need to remove the "Item Routing Failed" message that shows on the player's screen — just open the client's NDLanguage, delete the message, and leave a blank space. The error will still happen in-game, but nothing will be displayed, so it won't annoy the player.
+

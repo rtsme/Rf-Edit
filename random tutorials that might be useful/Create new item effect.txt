@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_createnewitemeffect.md — fidelity preserved from original]
+
 Open item.dat and go to the item.
 Copy the idmodel and open the file:
 client/chef/effectFileList.txt
@@ -107,3 +109,4 @@ Absaxis= 0
 PARTICLE=./CHEF/lanca/lanca120.spt
 
 Done — we've created the new effect.
+

@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_removegoldeffectonnpc.md — fidelity preserved from original]
+
 Open ndstore and open your client's NDStore.edf.
 
 Find the NPC you want to add or remove the effect from.
@@ -20,3 +22,4 @@ or
 ;.\Chef\Eff\npc\GoldenPig.EFF
 
 Note that the line will turn green if you're editing with Notepad — the effect has now been removed from the NPC, and the model will keep its original 3D color without the golden effect.
+

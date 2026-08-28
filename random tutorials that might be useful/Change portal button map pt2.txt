@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changeportalbuttonmappt2.md — fidelity preserved from original]
+
 Open the server's map.dat file with 010 Editor.
 
 Also check the other map tutorial, or open the server's map .spt file to add the dpfrom code or change the location there too.
@@ -95,3 +97,4 @@ client: DataTable/ here.
 If your dataTable has more folders inside, like:
 en-gb and others, then copy it into those too.
 Don't forget to convert the map.dat file to map.edf before pasting it into the Client folders.
+

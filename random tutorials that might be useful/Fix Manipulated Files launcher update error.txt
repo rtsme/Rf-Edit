@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_fixmanipulatedfileslauncherupdateerror.md — fidelity preserved from original]
+
 If the update is working, check the patchinfo file in the www/Download/ folder.
 
 The password to open patchinfo.z is:
@@ -39,3 +41,4 @@ Go back to the client/system/ folder and open filedata.z again, open the .dat fi
 
 The password to open patchinfo.z and filedata.z is:
 dhelsaktmxj
+

@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_editingremotenpcitem.md — fidelity preserved from original]
+
 Editing the item used to open an NPC remotely
 Example:
 (Unity Merchant Beeper) is an item used to access MAU remotely.
@@ -22,3 +24,4 @@ Paste the code you copied into the column (strStoreCode).
 
 Open the item.dat file, navigate to (pager in the menu)
 Paste the copied code into the (NPC) column matching the remote NPC item you edited.
+

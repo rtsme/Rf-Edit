@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_unlockquestlv50_56.md — fidelity preserved from original]
+
 Unlock quest lv50-56
 
 Edit the quest file rf\server\zoneserver\RF_Bin\Script\QuestLvlLimitEvent.dat, open it using a hex editor.
@@ -11,3 +13,4 @@ Edit the 02 to 00 and select the whole list after 88-08-00-00 and delete it, lea
 00 00 00 00 51 00 00 00 88 08 00 00
 
 Save and click yes to delete the history data. Done.
+

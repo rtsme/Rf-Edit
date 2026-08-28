@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_changemobheightsize.md — fidelity preserved from original]
+
 Open the file character.strs
 
 Convert the character.edf from the client folder into .dat
@@ -12,3 +14,4 @@ or
 This is the mob's height.
 
 Recommendation: find a mob that already has the height you want, copy the numbers from its column, and paste them onto the monster you want to edit.
+

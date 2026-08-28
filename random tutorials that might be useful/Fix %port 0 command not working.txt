@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_fixport0commandnotworking.md — fidelity preserved from original]
+
 After editing the map files, such as:
 
 NeutralB-[PORTAL].dat
@@ -13,3 +15,4 @@ If you remove them, the command stops working.
 In my case, when I edited the files to move from HQ to Ether and Ether to HQ, I made the mistake of replacing the block dpfrom_transport01 with dpfrom_platform01.
 
 But the correct approach was to leave the original dpfrom_transport01 block as is, and add a new block for dpfrom_platform01.
+

@@ -1,3 +1,5 @@
+﻿[Imported to docs/knowledge/tut_fixteleporterrordata.md — fidelity preserved from original]
+
 Example:
 
 In the client's map.dat file, struct maps map 0, which is NeutralB, I set it to go to Dungeon03, and it's at index 21 in the menu struct PORTAL_INFO pPortalInfo
@@ -23,3 +25,4 @@ At index 22 of maps.dat I set dpfrom_dungeon03, meaning it comes from Dungeon03.
 Then in the [PORTAL] file for NeutralB, at that same index 22, you need to put that it's coming from Dungeon3:
 
 dpfrom_dungeon03.
+
