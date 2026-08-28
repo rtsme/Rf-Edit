@@ -1,17 +1,26 @@
 """
-Keep a whole RF Online server's .dat tables in a git repo as CSV, edit them in
-an IDE, and build the changes back into the server.
+Keep a whole RF Online server's .dat tables (and, verbatim, the client's data
+files) in a git repo, edit them in an IDE, and build the changes back into an
+install.
 
 Library + CLI. The GUI in rf_workbench.py drives the same functions.
+Global options (--repo, --server, --root) go BEFORE the subcommand.
 
-    python rf_repo.py create  --server "C:\\...\\1_Server AOP" --repo D:\\rf-data
-    python rf_repo.py status  --repo D:\\rf-data
-    python rf_repo.py build   --repo D:\\rf-data [--confirm]
+    python rf_repo.py --repo D:\\rf-data --root server --server "C:\\...\\1_Server AOP" create
+    python rf_repo.py --repo D:\\rf-data --root client --server "C:\\...\\2_Client AOP" create
+    python rf_repo.py --repo D:\\rf-data status
+    python rf_repo.py --repo D:\\rf-data build [--confirm]
 
-The repo mirrors the server's folder structure, so a table that lives in
+`--repo` can point at a single root (has rfrepo.json directly) or at the
+rf-data parent of named roots (server/, client/): status/build/sync-files
+with no --root then operate on every root found, combined. `--root <name>`
+targets exactly one.
+
+Each root mirrors its install's folder structure, so a table that lives in
 Zoneserver\\RF_Bin\\Map\\NeutralA on the server is at
-csv/Zoneserver/RF_Bin/Map/NeutralA/<name>.csv in the repo, with its schema
-beside it under schemas/.
+server/csv/Zoneserver/RF_Bin/Map/NeutralA/<name>.csv in the repo, with its
+schema beside it under server/schemas/. The client root is verbatim-only --
+see docs/knowledge/client-file-formats.md.
 
 Why the CSVs can be trusted as the source of truth: `create` re-imports every
 CSV it writes, rebuilds the .dat, and compares byte-for-byte against the
@@ -40,6 +49,50 @@ MANIFEST = "rfrepo.json"
 # already text; there is nothing to gain from parsing them and something to
 # lose, since rewriting a config file is how you change behaviour by accident.
 VERBATIM_EXTS = (".ini",)
+
+# --- the client root (BACKLOG #9/#10) --------------------------------------
+#
+# No client file uses the server's container format -- see
+# docs/knowledge/client-file-formats.md. client/csv/ stays empty; every
+# editable client file is copied verbatim instead. The scan is restricted to
+# the directories #9 actually scanned: DataTable/, System/, and the loose
+# files at the client root. Map/, Character/, Chef/, item/, Effect/, Snd/,
+# SpriteImage/, Redist/ are the immutable bulk layer (spec 02 S1) and belong
+# to the asset store (#11) -- walking them here would be slow and wrong.
+CLIENT_SCAN_DIRS = ("DataTable", "System")
+
+# Standard third-party formats -- verdict ASSET in the knowledge file. These
+# belong to the asset store, not rf-data.
+CLIENT_ASSET_EXTS = (".ttf", ".dds", ".jpg", ".jpeg", ".z", ".tga", ".lc",
+                     ".dll", ".cso", ".pso", ".vso", ".sho", ".ani")
+
+# rfoemf.dat is a TrueType font under a .dat name -- the one file the
+# extension rule above gets wrong.
+CLIENT_ASSET_PATH_OVERRIDES = ("System/rfoemf.dat",)
+
+# Mutable binaries (spec 02 S1): exes, the patched RF_Online.bin, and
+# adjacent native-code files at the client root. These live in rf-client
+# directly with a PATCHES.md line per change (rule 8) -- rf-data's job is
+# editable *data*, not code. Found running #10 for real; #9's scan (which
+# only looked at "data directories") never enumerated them.
+CLIENT_BINARY_EXTS = (".exe", ".bin", ".sys", ".asi")
+
+# rf-client's own repo metadata sitting in the same working-copy folder --
+# not client data at all.
+CLIENT_META_EXCLUDE_PATHS = (".gitignore", "PATCHES.md")
+
+# Runtime output that changes on every launch (#37) -- never tracked.
+# init.r3o also leaks uninitialised process memory into git history.
+# d3d9-proxy.log joins the six #9 found -- also missed by #9's scan.
+CLIENT_EXCLUDE_PATHS = (
+    "dlctemp.db",
+    "sixrow-persist.log",
+    "d3d9-proxy.log",
+    "System/DefaultSet.tmp",
+    "System/RFVisuals/rf-smaa.log",
+    "System/RFVisuals/rf-visuals.log",
+    "System/Shader/init.r3o",
+)
 
 # Key names that make a setting a credential. Matched as substrings of the key,
 # because the real one on this server is "DB_Password" -- an earlier version of
@@ -75,6 +128,15 @@ GITATTRIBUTES = """\
 # are NOT uniform: on this server 32 .ini files use CRLF, 58 use LF and one
 # mixes both. -text switches off every conversion so a checkout reproduces the
 # exact bytes the server had. They still diff as text -- none contain NULs.
+files/** -text
+"""
+
+# The client's data under files/ is a mix of EUC-KR/cp949 text, CRLF text and
+# binary blobs -- see docs/knowledge/client-file-formats.md. Unlike the
+# server root, nothing here is known to be uniform ASCII/LF, so every byte is
+# kept exactly as read: no text/eol conversion at all. Scoped to files/ only
+# so the repo's own README/manifest still diff as normal text.
+CLIENT_GITATTRIBUTES = """\
 files/** -text
 """
 
@@ -124,6 +186,46 @@ backs up every file it overwrites into `backups/<timestamp>/` first.
 %(coverage)s
 """
 
+# For a verbatim-only root (client): no csv/, no schemas/, nothing to
+# "build" in the table sense -- just files/ copied and diffed byte for byte.
+README_TEMPLATE_VERBATIM = """\
+# %(name)s
+
+Verbatim, byte-for-byte copies of an RF Online install's data files, so they
+can be diffed, reviewed and edited in a normal editor -- see
+docs/knowledge/client-file-formats.md for why nothing here is converted.
+
+Install this was created from:
+
+    %(server)s
+
+## Layout
+
+- `files/` byte-for-byte copies. Editing one and building writes exactly
+  those bytes back to the install.
+- `%(manifest)s` records the install path and a sha256 + size per file.
+- `build/`, `backups/` generated, git-ignored.
+
+## Editing
+
+Edit the file directly -- no schema, no columns, no round-trip proof beyond
+"the bytes you wrote are the bytes that get built." Some files are legacy
+EUC-KR/cp949 text (not UTF-8); `.gitattributes` disables all text/eol
+conversion here so a checkout reproduces the exact bytes.
+
+## Building back
+
+    python rf_repo.py --repo <this folder> status
+    python rf_repo.py --repo <this folder> build --confirm
+
+`status` lists which files would change. `build` backs up every file it
+overwrites into `backups/<timestamp>/` first.
+
+## Coverage
+
+%(coverage)s
+"""
+
 
 # ---------------------------------------------------------------- scanning
 
@@ -146,6 +248,45 @@ def find_verbatim(root, exts=VERBATIM_EXTS):
             if fn.lower().endswith(lower):
                 out.append(os.path.relpath(os.path.join(dirpath, fn), root))
     return sorted(out)
+
+
+def find_client_verbatim(root):
+    """Every client file that belongs in client/files/ -- see CLIENT_* above.
+
+    Restricted to DataTable/, System/ and the loose files at the client root;
+    everything else (the bulk asset directories) is out of scope for #10.
+    """
+    out = []
+    for name in CLIENT_SCAN_DIRS:
+        sub = os.path.join(root, name)
+        if not os.path.isdir(sub):
+            continue
+        for dirpath, _dirs, files in os.walk(sub):
+            for fn in files:
+                out.append(os.path.relpath(os.path.join(dirpath, fn), root))
+    for fn in os.listdir(root):
+        if os.path.isfile(os.path.join(root, fn)):
+            out.append(fn)
+
+    def keep(rel):
+        key = rel.replace("\\", "/")
+        if (key in CLIENT_EXCLUDE_PATHS or key in CLIENT_ASSET_PATH_OVERRIDES
+                or key in CLIENT_META_EXCLUDE_PATHS):
+            return False
+        ext = os.path.splitext(key)[1].lower()
+        return ext not in CLIENT_ASSET_EXTS and ext not in CLIENT_BINARY_EXTS
+
+    return sorted(rel for rel in out if keep(rel))
+
+
+# Named root profiles for the CLI's --root flag. "server" is the historic
+# default: full .dat conversion plus VERBATIM_EXTS (.ini) copying. "client"
+# is verbatim-only -- see the CLIENT_* constants above.
+ROOT_PROFILES = {
+    "server": {"convert": True, "find_fn": None, "gitattributes": GITATTRIBUTES},
+    "client": {"convert": False, "find_fn": find_client_verbatim,
+              "gitattributes": CLIENT_GITATTRIBUTES},
+}
 
 
 def find_secrets(blob):
@@ -213,14 +354,31 @@ def write_manifest(repo, doc):
 
 # ------------------------------------------------------------------ create
 
-def create_repo(server_root, repo, progress=None, include=None):
+def create_repo(server_root, repo, progress=None, include=None, convert=True,
+                find_fn=None, gitattributes=GITATTRIBUTES, profile=None):
     """Convert every convertible .dat under server_root into repo/csv/.
+
+    profile selects a named entry from ROOT_PROFILES ("server" or "client"),
+    setting convert/find_fn/gitattributes together and recording the choice
+    in the manifest so a later sync-files knows which rules to reapply.
+    Passed explicitly, convert/find_fn/gitattributes override profile's
+    defaults (or work standalone with no profile at all).
+
+    convert=False skips the .dat conversion pass entirely (the client root:
+    no file there passes the container test, so there is nothing to attempt --
+    see docs/knowledge/client-file-formats.md). find_fn, if given, replaces
+    find_verbatim() for the verbatim files/ pass (find_client_verbatim for the
+    client root).
 
     Returns (manifest, converted, skipped) where skipped is a list of
     (rel_path, reason) -- tables that could not be represented losslessly and
     were therefore left out rather than half-imported.
     """
-    rels = find_dats(server_root)
+    if profile is not None:
+        p = ROOT_PROFILES[profile]
+        convert, find_fn, gitattributes = (p["convert"], p["find_fn"],
+                                           p["gitattributes"])
+    rels = find_dats(server_root) if convert else []
     if include:
         rels = [r for r in rels
                 if any(fnmatch.fnmatch(r.replace("\\", "/"), pat)
@@ -272,12 +430,15 @@ def create_repo(server_root, repo, progress=None, include=None):
         del t
 
     if progress:
-        progress(total, total, "copying config files")
-    files, secrets = export_files(server_root, repo, progress=progress)
+        progress(total, total, "copying files")
+    files, secrets = export_files(server_root, repo, progress=progress,
+                                  find_fn=find_fn)
 
     manifest = {
         "server_root": os.path.abspath(server_root),
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "convert": convert,
+        "profile": profile,
         "tables": tables,
         "skipped": {rel.replace("\\", "/"): why for rel, why in skipped},
         "files": files,
@@ -286,26 +447,39 @@ def create_repo(server_root, repo, progress=None, include=None):
     os.makedirs(repo, exist_ok=True)
     write_manifest(repo, manifest)
 
-    write_repo_meta(repo, server_root, manifest, n_dats=len(rels))
+    write_repo_meta(repo, server_root, manifest, n_dats=len(rels),
+                    gitattributes=gitattributes)
     return manifest, tables, skipped
 
 
-def write_repo_meta(repo, server_root, manifest, n_dats=None):
+def write_repo_meta(repo, server_root, manifest, n_dats=None,
+                    gitattributes=GITATTRIBUTES):
     """(Re)write README, .gitignore and .gitattributes from the manifest."""
     tables = manifest.get("tables", {})
     skipped = manifest.get("skipped", {})
     files = manifest.get("files", {})
     secrets = manifest.get("secrets", {})
+    convert = manifest.get("convert", True)
     if n_dats is None:
         n_dats = len(tables) + len(skipped)
-    coverage = (
-        "%d of %d .dat files under the server root are in this repo. The other "
-        "%d could not be represented losslessly and were left out; see "
-        "`skipped` in %s for the reason per file.\n\n"
-        "%d config file(s) are copied verbatim, byte for byte, under `files/`. "
-        "They are not converted -- they are already text -- so editing one in "
-        "the repo and building copies exactly those bytes back to the server."
-        % (len(tables), n_dats, len(skipped), MANIFEST, len(files)))
+    if convert:
+        coverage = (
+            "%d of %d .dat files under the server root are in this repo. The "
+            "other %d could not be represented losslessly and were left out; "
+            "see `skipped` in %s for the reason per file.\n\n"
+            "%d config file(s) are copied verbatim, byte for byte, under "
+            "`files/`. They are not converted -- they are already text -- so "
+            "editing one in the repo and building copies exactly those bytes "
+            "back to the server."
+            % (len(tables), n_dats, len(skipped), MANIFEST, len(files)))
+    else:
+        coverage = (
+            "This is a verbatim-only root: no file here passes rf_dat.py's "
+            "container test, so `csv/` stays empty -- see "
+            "docs/knowledge/client-file-formats.md for the per-file verdicts. "
+            "%d file(s) are copied byte for byte under `files/`. Editing one "
+            "in the repo and building copies exactly those bytes back to the "
+            "install." % len(files))
     gitignore = GITIGNORE
     if secrets:
         coverage += (
@@ -320,9 +494,10 @@ def write_repo_meta(repo, server_root, manifest, n_dats=None):
             "# history. Generated by rf_repo; remove a line to un-ignore.\n")
         for key in sorted(secrets):
             gitignore += "files/%s\n" % key
+    readme_template = README_TEMPLATE if convert else README_TEMPLATE_VERBATIM
     for name, text in ((".gitignore", gitignore),
-                       (".gitattributes", GITATTRIBUTES),
-                       ("README.md", README_TEMPLATE % {
+                       (".gitattributes", gitattributes),
+                       ("README.md", readme_template % {
                            "name": os.path.basename(os.path.abspath(repo)),
                            "server": os.path.abspath(server_root),
                            "manifest": MANIFEST,
@@ -337,19 +512,27 @@ def sync_files(repo, server_root=None, exts=VERBATIM_EXTS, progress=None):
 
     Lets config files be added to a repo whose tables are already exported,
     without spending twenty minutes reconverting several thousand .dat files
-    that haven't changed.
+    that haven't changed. Reapplies the same profile (server/client) the repo
+    was created with, if any -- so a client repo's sync-files doesn't need to
+    be told find_client_verbatim again.
     """
     manifest = read_manifest(repo)
     server_root = server_root or manifest["server_root"]
-    files, secrets = export_files(server_root, repo, exts, progress=progress)
+    profile = manifest.get("profile")
+    find_fn = ROOT_PROFILES[profile]["find_fn"] if profile else None
+    gitattributes = (ROOT_PROFILES[profile]["gitattributes"] if profile
+                     else GITATTRIBUTES)
+    files, secrets = export_files(server_root, repo, exts, progress=progress,
+                                  find_fn=find_fn)
     manifest["files"] = files
     manifest["secrets"] = secrets
     write_manifest(repo, manifest)
-    write_repo_meta(repo, server_root, manifest)
+    write_repo_meta(repo, server_root, manifest, gitattributes=gitattributes)
     return files, secrets
 
 
-def export_files(server_root, repo, exts=VERBATIM_EXTS, progress=None):
+def export_files(server_root, repo, exts=VERBATIM_EXTS, progress=None,
+                 find_fn=None):
     """Copy the server's config files into repo/files/ byte-for-byte.
 
     Returns (files, secrets). `secrets` maps a repo-relative path to the
@@ -357,7 +540,7 @@ def export_files(server_root, repo, exts=VERBATIM_EXTS, progress=None):
     so they stay in the working tree -- editable, and buildable back to the
     server -- without ever entering git history.
     """
-    rels = find_verbatim(server_root, exts)
+    rels = find_fn(server_root) if find_fn else find_verbatim(server_root, exts)
     files, secrets = {}, {}
     for i, rel in enumerate(rels):
         if progress:
@@ -622,12 +805,46 @@ def _bar(done, total, msg):
     sys.stdout.flush()
 
 
+def discover_roots(repo):
+    """Named subdirectories of repo that are themselves rf-data roots."""
+    out = []
+    if not os.path.isdir(repo):
+        return out
+    for name in sorted(os.listdir(repo)):
+        sub = os.path.join(repo, name)
+        if os.path.isdir(sub) and os.path.exists(os.path.join(sub, MANIFEST)):
+            out.append(name)
+    return out
+
+
+def resolve_roots(repo, root_arg):
+    """[(name, path)] to operate on for status/build/sync-files.
+
+    --root <name> targets exactly that subdirectory. Omitted (or "all"): if
+    `repo` is itself a repo (has rfrepo.json, the pre-multi-root single-root
+    shape), that one root; otherwise every named subdirectory that is one --
+    the "combined" mode spec 02 S3 asks for.
+    """
+    if root_arg and root_arg != "all":
+        return [(root_arg, os.path.join(repo, root_arg))]
+    if os.path.exists(os.path.join(repo, MANIFEST)):
+        return [(None, repo)]
+    names = discover_roots(repo)
+    if not names:
+        raise SystemExit(
+            "%s has no %s and no named root subdirectory (server/, client/) "
+            "-- nothing to operate on." % (repo, MANIFEST))
+    return [(name, os.path.join(repo, name)) for name in names]
+
+
 def cmd_create(args):
     if not args.server:
         raise SystemExit("--server is required for create")
-    manifest, tables, skipped = create_repo(args.server, args.repo,
-                                            progress=_bar)
-    print("\n\ncreated %s" % os.path.abspath(args.repo))
+    target = os.path.join(args.repo, args.root) if args.root else args.repo
+    profile = args.root if args.root in ROOT_PROFILES else None
+    manifest, tables, skipped = create_repo(args.server, target,
+                                            progress=_bar, profile=profile)
+    print("\n\ncreated %s" % os.path.abspath(target))
     print("  %d table(s) converted" % len(tables))
     print("  %d skipped" % len(skipped))
     reasons = {}
@@ -635,63 +852,88 @@ def cmd_create(args):
         reasons.setdefault(why, []).append(rel)
     for why, rels in sorted(reasons.items(), key=lambda kv: -len(kv[1])):
         print("    %5d  %s" % (len(rels), why[:90]))
+    print("  %d file(s) copied verbatim" % len(manifest.get("files", {})))
     return 0
 
 
+def _check_single_server_override(roots, server_arg):
+    if server_arg and len(roots) > 1:
+        raise SystemExit(
+            "--server only applies to a single root; pass --root to target "
+            "one, or drop --server to use each root's own recorded path.")
+
+
 def cmd_sync_files(args):
-    files, secrets = sync_files(args.repo, args.server, progress=_bar)
-    sys.stdout.write("\r" + " " * 78 + "\r")
-    print("%d config file(s) copied into files/" % len(files))
-    if secrets:
-        print("\n%d contain credentials and were added to .gitignore:"
-              % len(secrets))
-        for key in sorted(secrets):
-            print("  %-56s (%s)" % (key, ", ".join(secrets[key])))
-        print("\nThey are still on disk and still build back to the server; "
-              "they just won't be committed.")
+    roots = resolve_roots(args.repo, args.root)
+    _check_single_server_override(roots, args.server)
+    for name, path in roots:
+        if name:
+            print("=== %s ===" % name)
+        files, secrets = sync_files(path, args.server, progress=_bar)
+        sys.stdout.write("\r" + " " * 78 + "\r")
+        print("%d file(s) copied into files/" % len(files))
+        if secrets:
+            print("\n%d contain credentials and were added to .gitignore:"
+                  % len(secrets))
+            for key in sorted(secrets):
+                print("  %-56s (%s)" % (key, ", ".join(secrets[key])))
+            print("\nThey are still on disk and still build back to the "
+                  "install; they just won't be committed.")
     return 0
 
 
 def cmd_status(args):
-    statuses = diff_repo(args.repo, args.server, progress=_bar)
-    sys.stdout.write("\r" + " " * 78 + "\r")
-    changed = [s for s in statuses if s.state == Status.CHANGED]
-    broken = [s for s in statuses if s.state == Status.ERROR]
-    gone = [s for s in statuses if s.state == Status.GONE]
-    if changed:
-        print("WOULD CHANGE ON THE SERVER (%d):" % len(changed))
-        for s in changed:
-            print("  %-58s %s" % (s.rel[-58:], s.detail))
-        print()
-    if broken:
-        print("WON'T BUILD (%d) -- build is blocked until these are fixed:"
-              % len(broken))
-        for s in broken:
-            print("  %-58s %s" % (s.rel[-58:], s.detail[:60]))
-        print()
-    if gone:
-        print("in the repo but not on the server: %d\n" % len(gone))
-    print("%d unchanged, %d changed, %d missing, %d broken"
-          % (len(statuses) - len(changed) - len(broken) - len(gone),
-             len(changed), len(gone), len(broken)))
-    return 1 if broken else 0
+    roots = resolve_roots(args.repo, args.root)
+    _check_single_server_override(roots, args.server)
+    any_broken = False
+    for name, path in roots:
+        if name:
+            print("=== %s ===" % name)
+        statuses = diff_repo(path, args.server, progress=_bar)
+        sys.stdout.write("\r" + " " * 78 + "\r")
+        changed = [s for s in statuses if s.state == Status.CHANGED]
+        broken = [s for s in statuses if s.state == Status.ERROR]
+        gone = [s for s in statuses if s.state == Status.GONE]
+        if changed:
+            print("WOULD CHANGE (%d):" % len(changed))
+            for s in changed:
+                print("  %-58s %s" % (s.rel[-58:], s.detail))
+            print()
+        if broken:
+            print("WON'T BUILD (%d) -- build is blocked until these are fixed:"
+                  % len(broken))
+            for s in broken:
+                print("  %-58s %s" % (s.rel[-58:], s.detail[:60]))
+            print()
+        if gone:
+            print("in the repo but not on the install: %d\n" % len(gone))
+        print("%d unchanged, %d changed, %d missing, %d broken"
+              % (len(statuses) - len(changed) - len(broken) - len(gone),
+                 len(changed), len(gone), len(broken)))
+        any_broken = any_broken or bool(broken)
+    return 1 if any_broken else 0
 
 
 def cmd_build(args):
-    pending, backup = build_to_server(args.repo, args.server,
-                                      apply=args.confirm, progress=_bar)
-    sys.stdout.write("\r" + " " * 78 + "\r")
-    if not pending:
-        print("Nothing to build -- the server already matches the repo.")
-        return 0
-    for s in pending:
-        print("  %-58s %s" % (s.rel[-58:], s.detail))
-    if args.confirm:
-        print("\nWrote %d file(s). Originals backed up to\n  %s"
-              % (len(pending), backup))
-    else:
-        print("\n%d file(s) would change. Nothing written -- re-run with "
-              "--confirm to apply." % len(pending))
+    roots = resolve_roots(args.repo, args.root)
+    _check_single_server_override(roots, args.server)
+    for name, path in roots:
+        if name:
+            print("=== %s ===" % name)
+        pending, backup = build_to_server(path, args.server,
+                                          apply=args.confirm, progress=_bar)
+        sys.stdout.write("\r" + " " * 78 + "\r")
+        if not pending:
+            print("Nothing to build -- the install already matches the repo.")
+            continue
+        for s in pending:
+            print("  %-58s %s" % (s.rel[-58:], s.detail))
+        if args.confirm:
+            print("\nWrote %d file(s). Originals backed up to\n  %s"
+                  % (len(pending), backup))
+        else:
+            print("\n%d file(s) would change. Nothing written -- re-run with "
+                  "--confirm to apply." % len(pending))
     return 0
 
 
@@ -699,18 +941,26 @@ def main(argv=None):
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--repo", required=True, help="repo directory")
+    p.add_argument("--repo", required=True,
+                   help="repo directory -- a single root, or the rf-data "
+                   "parent of named roots (server/, client/)")
     p.add_argument("--server", default=None,
-                   help="server root (defaults to the one recorded in the repo)")
+                   help="install root (defaults to the one recorded in the "
+                   "repo; only valid when exactly one root is in play)")
+    p.add_argument("--root", default=None,
+                   help="which named root under --repo to operate on "
+                   "(server, client, ...). status/build/sync-files: omitted "
+                   "or 'all' means every root found under --repo, combined. "
+                   "create: required unless --repo is already a single root.")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("create", help="server .dat -> new repo").set_defaults(
+    sub.add_parser("create", help="install -> new repo").set_defaults(
         func=cmd_create)
     sub.add_parser("sync-files",
-                   help="refresh only the verbatim config files (.ini)"
+                   help="refresh only the verbatim files"
                    ).set_defaults(func=cmd_sync_files)
-    sub.add_parser("status", help="what would change on the server").set_defaults(
+    sub.add_parser("status", help="what would change on the install").set_defaults(
         func=cmd_status)
-    b = sub.add_parser("build", help="write changed tables to the server")
+    b = sub.add_parser("build", help="write changed tables to the install")
     b.add_argument("--confirm", action="store_true",
                    help="actually write (without it, only lists changes)")
     b.set_defaults(func=cmd_build)
