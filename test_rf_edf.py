@@ -27,6 +27,7 @@ from rf_edf import (CHAIN_HEADER, CHAIN_HEADER_SIZE, DAT_HEADER, EDF_MIN_TEXT_SH
                     classify, dat_layout,
                     decrypt, encrypt, grammar_for, parse_dat_tables,
                     parse_table_chain, parse_var_tables, pool_record_size,
+                    INFERRED_CHAIN,
                     read_field, read_grammar_json, verify_grammar,
                     write_field, write_grammar_json)
 
@@ -413,10 +414,14 @@ class VariableRecordTests(unittest.TestCase):
         self.assertIsNotNone(grammar_for("NDItem.edf"))
         self.assertIsNotNone(grammar_for("NDMsgMonster.edf"))
         self.assertIsNotNone(grammar_for("NDQuest.edf"))
+        self.assertIsNotNone(grammar_for("GameData.edf"))
+        self.assertIsNotNone(grammar_for("NDEventShip.edf"))
         # Everything else is still an opaque blob, and must stay one until
         # its grammar is derived rather than guessed.
         self.assertIsNone(grammar_for("Item.edf"))
         self.assertIsNone(grammar_for("NDMap.edf"))
+        self.assertIsNone(grammar_for("Map.edf"))
+        self.assertIsNone(grammar_for("Resource.edf"))
         for name, grammars in EDF_TABLE_GRAMMARS.items():
             for grammar in grammars:
                 verify_grammar(grammar, name)
@@ -1002,6 +1007,125 @@ class PooledFieldTests(unittest.TestCase):
                 json.dump(doc, f)
             with self.assertRaises(EdfError):
                 read_grammar_json(json_path)
+
+
+class MixedChainTests(unittest.TestCase):
+    """BACKLOG #52: a file that is chain-shaped in part and not in the rest.
+
+    The grammar under test is the real `NDEventShip.edf` one -- four ordinary
+    chain tables read by inference (INFERRED_CHAIN), then one count-only table
+    of `<u32 len><len bytes><i32 -1>` messages. `GameData.edf` is the same
+    shape with eight chain tables in front instead of four.
+
+    One count-only table at the end is enough to stop `parse_table_chain` at
+    offset 0, because the chain walk is all-or-nothing; INFERRED_CHAIN is how
+    the tables that *are* chain tables keep being read as such.
+    """
+
+    SHIP = EDF_TABLE_GRAMMARS["ndeventship.edf"]
+    MESSAGES = SHIP[-1]
+
+    def _chain(self, records, rec_size):
+        return (struct.pack(CHAIN_HEADER, len(records), rec_size)
+                + b"".join(r.ljust(rec_size, b"\x00") for r in records))
+
+    def _messages(self, texts):
+        out = struct.pack("<I", len(texts))
+        for text in texts:
+            out += struct.pack("<I", len(text) + 1) + text + b"\x00"
+            out += struct.pack("<i", -1)
+        return out
+
+    def _payload(self, texts=(b"Now boarding.",)):
+        return (self._chain([b"Bellato HQ Port of Arrival"], 64)
+                + self._chain([b"Cora HQ Port of Arrival"], 64)
+                + self._chain([b"Accretia HQ Port of Arrival"], 64)
+                + self._chain([struct.pack("<5I", 1, 2, 3, 4, 5)], 20)
+                + self._messages(list(texts)))
+
+    def test_round_trip(self):
+        payload = self._payload([b"Now boarding.", b"Please buy a ticket."])
+        tables = parse_var_tables(payload, self.SHIP, "NDEventShip.edf")
+        self.assertEqual(len(tables), 5)
+        for table in tables[:4]:
+            self.assertIsInstance(table, Table)
+        self.assertIsInstance(tables[4], VarTable)
+        self.assertEqual([r["Text"] for r in tables[4].rows],
+                         ["Now boarding.", "Please buy a ticket."])
+        self.assertEqual(build_var_tables(tables), payload)
+
+    def test_a_chain_table_keeps_its_own_eight_byte_header(self):
+        # rf_dat.Table.to_bytes writes the server's 12-byte header. A chain
+        # table does not carry the middle field_count, so build_var_tables has
+        # to write the 8-byte one -- if it did not, every table after the
+        # first would move by four bytes.
+        payload = self._payload()
+        tables = parse_var_tables(payload, self.SHIP, "NDEventShip.edf")
+        rebuilt = build_var_tables(tables)
+        self.assertEqual(rebuilt[:CHAIN_HEADER_SIZE],
+                         struct.pack(CHAIN_HEADER, 1, 64))
+        self.assertEqual(len(rebuilt), len(payload))
+
+    def test_an_inferred_chain_table_is_read_by_inference(self):
+        # No hand-written field list anywhere: the header states the record
+        # size, and the schema is whatever infer_schema makes of the records,
+        # under exactly the settings the 17 chain files are read with.
+        record = b"Bellato HQ Port of Arrival".ljust(64, bytes([0]))
+        tables = parse_var_tables(self._payload(), self.SHIP,
+                                  "NDEventShip.edf")
+        self.assertEqual(tables[0].rec_size, 64)
+        self.assertEqual(tables[0].schema_source, "inferred from records")
+        self.assertEqual(tables[0].schema,
+                         infer_schema([record], 64,
+                                      string_widths=EDF_STRING_WIDTHS,
+                                      allow_short_numbers=True,
+                                      min_text_share=EDF_MIN_TEXT_SHARE))
+
+    def test_the_message_length_is_derived_not_stored(self):
+        # LPSTR's contract, so the CSV holds the text and never a byte count.
+        payload = self._payload([b"Now boarding."])
+        tables = parse_var_tables(payload, self.SHIP, "NDEventShip.edf")
+        self.assertEqual([n for n, _ in tables[4].grammar],
+                         ["Text", "Unknown1"])
+        tables[4].rows[0]["Text"] = "Now boarding, at last."
+        self.assertEqual(build_var_tables(tables),
+                         self._payload([b"Now boarding, at last."]))
+
+    def test_refuses_a_grammar_that_does_not_close(self):
+        # The count-only table is last, so a message run that stops short
+        # leaves bytes over -- which is what a misread count looks like.
+        payload = self._payload() + b"\x00\x00\x00\x00"
+        with self.assertRaises(EdfError):
+            parse_var_tables(payload, self.SHIP, "NDEventShip.edf")
+
+    def test_refuses_a_message_that_is_not_one_terminated_run(self):
+        payload = bytearray(self._payload([b"Now boarding."]))
+        payload[-5] = 0x21          # the terminator, overwritten
+        with self.assertRaises(EdfError):
+            parse_var_tables(bytes(payload), self.SHIP, "NDEventShip.edf")
+
+    def test_refuses_a_header_that_is_not_a_table_header(self):
+        # An INFERRED_CHAIN table gets chain_layout's guard rails, for
+        # chain_layout's reason: a garbage record size is a misread header.
+        payload = struct.pack(CHAIN_HEADER, 1, 0) + self._payload()
+        with self.assertRaises(EdfError):
+            parse_var_tables(payload, [INFERRED_CHAIN] + list(self.SHIP),
+                             "NDEventShip.edf")
+
+    def test_refuses_a_chain_table_running_past_the_payload(self):
+        payload = struct.pack(CHAIN_HEADER, 4096, 64) + b"\x00" * 16
+        with self.assertRaises(EdfError):
+            parse_var_tables(payload, [INFERRED_CHAIN], "NDEventShip.edf")
+
+    def test_gamedata_is_the_same_shape_with_more_chain_tables(self):
+        gamedata = EDF_TABLE_GRAMMARS["gamedata.edf"]
+        self.assertEqual(gamedata[:8], [INFERRED_CHAIN] * 8)
+        # The message table is the same one, not a second reading of it: the
+        # two files carry the same 61 announcements.
+        self.assertEqual(gamedata[-1], self.MESSAGES)
+
+    def test_verify_grammar_accepts_the_sentinel(self):
+        self.assertIs(verify_grammar(INFERRED_CHAIN), INFERRED_CHAIN)
 
 
 if __name__ == "__main__":

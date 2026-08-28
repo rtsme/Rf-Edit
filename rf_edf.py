@@ -83,7 +83,18 @@ header -- which is what `ChainGrammar` reads: a chain-format table with a
 hand-written field list, checked against the record size the file itself
 states.
 
-The remaining 6 stay opaque blobs until someone reads the client's reader for
+BACKLOG #52 last found a file that is chain-shaped for most of its length and
+count-only for the rest: `en-ph/GameData.edf` is eight ordinary chain tables
+-- the first seven of them `EventShip.edf`'s whole payload, table for table --
+and then one table of flying-ship announcements the chain walk cannot read.
+One count-only table at the end is enough to stop `parse_table_chain` at
+offset 0, so those eight need a way to say "read this the way a chain file is
+read", which is `INFERRED_CHAIN`: the only entry in `EDF_TABLE_GRAMMARS` that
+is not a hand-derived layout, because there is nothing there to derive.
+`en-ph/NDEventShip.edf` is the same file localised, and carries the same 61
+announcements -- which is what proves the reading of both.
+
+The remaining 4 stay opaque blobs until someone reads the client's reader for
 them: `--classify` says which file is which and why, and every parser here
 refuses rather than guessing, because a plausible-looking mis-parse would
 corrupt the file on write. See `docs/knowledge/edf-payload-tables.md` for the
@@ -779,6 +790,62 @@ def chain_record_size(grammar):
     return sum(field_width(t) for _, t in grammar.fields)
 
 
+# An **inferred chain** table: BACKLOG #52's fifth shape, and the only one
+# that adds no reading of its own. It is an ordinary 8-byte chain-format table
+# -- `<u32 record_count><u32 record_size>` and fixed records -- sitting in a
+# file that is not a chain end to end, read exactly the way the 17 chain files
+# are, `infer_schema` and all.
+#
+# GameData.edf is why it exists. Its first eight tables *are* chain tables:
+# the first seven are EventShip.edf's entire payload, table for table, and
+# that file is one of the 17 that already round-trip byte-exactly. Only the
+# ninth table is something else -- and one count-only table at the end is
+# enough to stop `parse_table_chain` at offset 0, because the chain walk is
+# all-or-nothing by design.
+#
+# So this is the one entry in EDF_TABLE_GRAMMARS that is not a hand-derived
+# layout, for the good reason that there is nothing to derive: the header
+# states the record size, `infer_schema` labels the fields as it does for
+# every chain file, and the byte-exact round trip is the check, unchanged.
+# Spelling those eight tables out as ChainGrammars instead would have replaced
+# inference proven on 17 files with fifty-odd hand-typed field names, and
+# asserted boundaries the file already states.
+class _InferredChain(object):
+    """The type of `INFERRED_CHAIN`; a class only so it can be recognised."""
+
+    __slots__ = ()
+
+    def __repr__(self):
+        return "INFERRED_CHAIN"
+
+
+INFERRED_CHAIN = _InferredChain()
+
+
+def _parse_inferred_chain(data, offset, source):
+    """Read one ordinary chain-format table at `offset`, schema inferred.
+
+    Returns the `rf_dat.Table` and the offset just past it. Header checks are
+    `chain_layout`'s, for `chain_layout`'s reason: a count or a record size
+    outside these is a misread header rather than a table, and saying so beats
+    allocating on a garbage length.
+    """
+    if offset + CHAIN_HEADER_SIZE > len(data):
+        raise EdfError("%s: %d byte(s) left, too few for an 8-byte table "
+                       "header" % (source, len(data) - offset))
+    count, rec_size = struct.unpack_from(CHAIN_HEADER, data, offset)
+    if rec_size == 0 or rec_size > MAX_RECORD_SIZE or count > MAX_RECORD_COUNT:
+        raise EdfError("%s: reads as %d records of %d bytes, which is not a "
+                       "table header" % (source, count, rec_size))
+    start = offset + CHAIN_HEADER_SIZE
+    end = start + count * rec_size
+    if end > len(data):
+        raise EdfError("%s: claims %d records of %d bytes, %d past the end of "
+                       "the payload"
+                       % (source, count, rec_size, end - len(data)))
+    return _table_from_records(data[start:end], count, rec_size, source), end
+
+
 # A **pool** grammar: BACKLOG #52's third shape, the one NDMsgMonster.edf is.
 # The records are fixed-width and sit in an ordinary chain-format table,
 # header and all -- but each carries an array of byte *lengths* whose text is
@@ -829,6 +896,10 @@ def _verify_fields(grammar, source):
 
 def verify_grammar(grammar, source="grammar"):
     """Reject a grammar that could not produce a usable CSV. Returns it."""
+    if grammar is INFERRED_CHAIN:
+        # Nothing to check: the file states the record size and the schema is
+        # inferred from the records, exactly as for a chain file.
+        return grammar
     if isinstance(grammar, ChainGrammar):
         _verify_fields(grammar.fields, "%s record" % source)
         for name, ftype in grammar.fields:
@@ -1063,6 +1134,51 @@ EDF_TABLE_GRAMMARS = {
         ChainGrammar([("Name", "zstr[32]")]),
         ChainGrammar([("Id", "dword"), ("Unknown1", "dword"),
                       ("Text", POOLSTR), ("Unknown2", "dword")]),
+    ],
+    # BACKLOG #52. The first *mixed* file: eight ordinary chain tables and
+    # then one that is not a chain table at all.
+    #
+    # **What makes the eight a reading rather than a guess is that another
+    # file already is them.** EventShip.edf's whole payload is a chain of
+    # 198x8, 5x80, 5x80, 6x80, 768x16, 768x16, 864x16 -- exactly this file's
+    # first seven tables, in that order, and 1109 bytes apart in content out
+    # of 41320. EventShip.edf is one of the 17 that already round-trip
+    # byte-exactly, so those seven tables need no new reading and get none;
+    # the eighth, 11x8, is a chain table by the same header. See
+    # INFERRED_CHAIN above for why they are not hand-written field lists.
+    #
+    # The ninth table is `<u32 61>` and then 61 x
+    # (`<u32 len><len bytes><i32 -1>`): the flying-ship announcements. The
+    # chain walk mistook that count and the first message's length for a
+    # table header -- "61 records of 155 bytes", 155 being the length of
+    # `Kartella is happy to serve you!...` -- which is why it did not break
+    # here but 9463 bytes further on, mid-word, in the middle of a sentence.
+    #
+    # **What makes the ninth a derivation is NDEventShip.edf.** That file is
+    # this one's localisation pair -- the same 5, 5, 6 and 11 entries in
+    # narrower records -- and carries the same table. Walked independently,
+    # from an offset 40140 bytes away, it closes on its own last payload byte
+    # with 61 records too, and 60 of its 61 messages are byte-identical to
+    # these. The one that is not, record 58, differs only in the right single
+    # quote: cp1252 `92` here, UTF-8 `e2 80 99` there, which is the whole of
+    # the two records' 2-byte length difference. Sixty-one agreements between
+    # two walks that share no offset, on top of the 61 the file itself
+    # declares matching the 61 the walk reads.
+    #
+    # Every message is one NUL-terminated run inside its length, which LPSTR
+    # checks record by record and all 122 pass. The trailing dword is
+    # numbered rather than named: it is -1 in every record of both files, and
+    # a constant says nothing about its own role -- an unused index and a
+    # "none" sentinel look identical from here.
+    "gamedata.edf": [INFERRED_CHAIN] * 8 + [
+        [("Text", LPSTR), ("Unknown1", "dword")],
+    ],
+    # BACKLOG #52. GameData.edf's localisation pair, and the other half of
+    # that entry's cross-check -- read it there. Four chain tables (5, 5 and
+    # 6 port names in 64-byte records, then 11 x 20) and the same 61
+    # announcements, in the same order, in the same shape.
+    "ndeventship.edf": [INFERRED_CHAIN] * 4 + [
+        [("Text", LPSTR), ("Unknown1", "dword")],
     ],
 }
 
@@ -1697,6 +1813,11 @@ def parse_var_tables(payload, grammars, source="EDF payload"):
     tables = []
     offset = 0
     for i, grammar in enumerate(grammars):
+        if grammar is INFERRED_CHAIN:
+            table, offset = _parse_inferred_chain(
+                payload, offset, "%s#%d" % (source, i))
+            tables.append(table)
+            continue
         if isinstance(grammar, PoolGrammar):
             reader = PoolTable
         elif isinstance(grammar, BlockGrammar):
@@ -1718,10 +1839,20 @@ def parse_var_tables(payload, grammars, source="EDF payload"):
 
 
 def build_var_tables(tables):
-    """Rebuild a count-only payload from `VarTable`s."""
+    """Rebuild a count-only payload from `VarTable`s.
+
+    An `rf_dat.Table` among them is an INFERRED_CHAIN one, and is written back
+    with the 8-byte chain header `build_table_chain` writes: its own
+    `to_bytes` writes the server's 12-byte header, whose middle `field_count`
+    a chain table does not carry.
+    """
     out = bytearray()
     for table in tables:
-        out += table.to_bytes()
+        if isinstance(table, Table):
+            out += struct.pack(CHAIN_HEADER, len(table.rows), table.rec_size)
+            out += table.to_bytes()[HEADER_SIZE:]
+        else:
+            out += table.to_bytes()
     return bytes(out)
 
 
