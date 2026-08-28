@@ -1180,6 +1180,63 @@ EDF_TABLE_GRAMMARS = {
     "ndeventship.edf": [INFERRED_CHAIN] * 4 + [
         [("Text", LPSTR), ("Unknown1", "dword")],
     ],
+    # BACKLOG #52. The client's asset manifest: 27 count-only tables of
+    # fixed-width records, three shapes repeating nine times, closing exactly
+    # on the last of 7 679 792 payload bytes. It needs no new machinery -- the
+    # records are flat fixed fields -- so all the work here was the record
+    # sizes, which the file does not state.
+    #
+    # **What derives them is that the tables say what they hold.** Each record
+    # carries a 128-byte directory and a 64-byte file name, and the three
+    # shapes are the three halves of one asset: a skeleton (`.BN`) with its
+    # bounding box (`.BBX`), a mesh (`.MSH`) with the directory of its
+    # textures, and an animation (`.ANI`). Read at these sizes, all 28 011
+    # records agree, with no exceptions anywhere:
+    #
+    #   * every one of the 1 205 bone records has a `.BN` at +132 and a
+    #     `.BBX` at +196; every one of the 9 830 mesh records a `.MSH` at
+    #     +136; every one of the 16 976 animation records an `.ANI` at +136;
+    #   * every record's text begins exactly at the field offsets below, and
+    #     not one record of the 28 011 has a byte after a terminator inside a
+    #     slot -- a boundary off by any amount would put a name's tail in the
+    #     next field in some record somewhere;
+    #   * the 48 distinct directory values are real client asset directories
+    #     (`.\CHARACTER\PLAYER\BONE\`, `.\ITEM\WEAPON\MESH\`, ...), 42 of
+    #     which exist in the AoP 4.15 install, and where a directory's assets
+    #     are unpacked on disk rather than in the client's archive its names
+    #     resolve to real files -- player bone 10 of 10, animus bone 80 of 80,
+    #     guard tower bone 22 of 22, armour animation 160 of 160.
+    #
+    # The nine groups are asset families -- PLAYER, MONSTER, ANIMUS,
+    # GUARDTOWER, NPC, ITEM, UNIT and two more of player animations -- and
+    # each group's three tables are that family's `BONE\`, `MESH\`+`TEX\` and
+    # `ANI\` directories. That a fixed three-table cycle falls out nine times
+    # over, each time on one family, is the cross-check: a record size wrong
+    # anywhere in the walk would land the next table's count on bytes that are
+    # not a count, and could not put the right directory in the right table
+    # twenty-seven times running. `Id` corroborates it again -- within a group
+    # the bone and mesh tables key on the same id space (monsters 0..552 in
+    # both, guard towers 16 424..41 256 in both, NPCs 12 288..169 135 in both)
+    # while being read at different record sizes.
+    #
+    # Everything not a path or a name is numbered rather than named. The
+    # animation record's ten trailing dwords are an array with its used count
+    # in front, but the count stays an ordinary column and is not derived from
+    # the values: 181 of the 16 976 records have a count of 1 over an array
+    # whose first entry is 0, so a zero entry is a value here and not an empty
+    # slot, and rebuilding the count from the array would corrupt them.
+    "resource.edf": [
+        # a skeleton and its bounding box
+        [("Id", "dword"), ("Path", "zstr[128]"),
+         ("BoneFile", "zstr[64]"), ("BoundsFile", "zstr[64]")],
+        # a mesh, and the directory its textures live in
+        [("Id", "dword"), ("Unknown1", "dword"), ("MeshPath", "zstr[128]"),
+         ("MeshFile", "zstr[64]"), ("TexPath", "zstr[128]")],
+        # an animation, and ten numbers with a count in front of them
+        [("Id", "dword"), ("Unknown1", "dword"), ("Path", "zstr[128]"),
+         ("AniFile", "zstr[64]"), ("Unknown2", "dword")]
+        + [("Unknown%d" % (i + 3), "dword") for i in range(10)],
+    ] * 9,
 }
 
 

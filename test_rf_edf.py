@@ -25,7 +25,7 @@ from rf_edf import (CHAIN_HEADER, CHAIN_HEADER_SIZE, DAT_HEADER, EDF_MIN_TEXT_SH
                     VarTable, build_dat_tables, build_table_chain,
                     build_var_tables, chain_layout, chain_record_size,
                     classify, dat_layout,
-                    decrypt, encrypt, grammar_for, parse_dat_tables,
+                    decrypt, encrypt, field_width, grammar_for, parse_dat_tables,
                     parse_table_chain, parse_var_tables, pool_record_size,
                     INFERRED_CHAIN,
                     read_field, read_grammar_json, verify_grammar,
@@ -416,12 +416,12 @@ class VariableRecordTests(unittest.TestCase):
         self.assertIsNotNone(grammar_for("NDQuest.edf"))
         self.assertIsNotNone(grammar_for("GameData.edf"))
         self.assertIsNotNone(grammar_for("NDEventShip.edf"))
+        self.assertIsNotNone(grammar_for("Resource.edf"))
         # Everything else is still an opaque blob, and must stay one until
         # its grammar is derived rather than guessed.
         self.assertIsNone(grammar_for("Item.edf"))
         self.assertIsNone(grammar_for("NDMap.edf"))
         self.assertIsNone(grammar_for("Map.edf"))
-        self.assertIsNone(grammar_for("Resource.edf"))
         for name, grammars in EDF_TABLE_GRAMMARS.items():
             for grammar in grammars:
                 verify_grammar(grammar, name)
@@ -1126,6 +1126,95 @@ class MixedChainTests(unittest.TestCase):
 
     def test_verify_grammar_accepts_the_sentinel(self):
         self.assertIs(verify_grammar(INFERRED_CHAIN), INFERRED_CHAIN)
+
+
+class AssetManifestTests(unittest.TestCase):
+    """BACKLOG #52: `Resource.edf`, 27 count-only tables of fixed records.
+
+    The grammars under test are the real ones. They need no machinery of their
+    own -- flat fixed fields in a count-only table is what `VarTable` already
+    is -- so what these cover is the shape: three record sizes the file does
+    not state, repeating nine times, one cycle per asset family.
+    """
+
+    RESOURCE = EDF_TABLE_GRAMMARS["resource.edf"]
+    BONE, MESH, ANI = RESOURCE[0], RESOURCE[1], RESOURCE[2]
+
+    def _table(self, grammar, records):
+        out = struct.pack("<I", len(records))
+        for rec in records:
+            for (name, ftype), value in zip(grammar, rec):
+                out += write_field(value, ftype)
+        return out
+
+    def test_the_three_record_sizes_are_the_derived_ones(self):
+        # 260, 328 and 244 -- what the walk arrives at, and what every one of
+        # the 28 011 records in the real file agrees with.
+        for grammar, size in ((self.BONE, 260), (self.MESH, 328),
+                              (self.ANI, 244)):
+            self.assertEqual(sum(field_width(t) for _, t in grammar), size)
+
+    def test_the_cycle_repeats_nine_times(self):
+        # Nine asset families, three tables each, and the same three shapes
+        # every time -- not 27 independently chosen layouts.
+        self.assertEqual(len(self.RESOURCE), 27)
+        for i, grammar in enumerate(self.RESOURCE):
+            self.assertIs(grammar, self.RESOURCE[i % 3])
+
+    def test_round_trip(self):
+        payload = (
+            self._table(self.BONE, [
+                (0, ".\\CHARACTER\\PLAYER\\BONE\\", "BELMALE.BN",
+                 "BELMALE.BBX")])
+            + self._table(self.MESH, [
+                (4195842, -1, ".\\CHARACTER\\PLAYER\\MESH\\",
+                 "ACCRETIA_ARMOR_CLOAK_002.MSH",
+                 ".\\CHARACTER\\PLAYER\\TEX\\")])
+            + self._table(self.ANI, [
+                (16, 1, ".\\CHARACTER\\PLAYER\\ANI\\", "BELMALE_IDLE_00.ANI",
+                 3, 11, 19, 23, 0, 0, 0, 0, 0, 0, 0)]))
+        tables = parse_var_tables(payload, self.RESOURCE[:3], "Resource.edf")
+        self.assertEqual(len(tables), 3)
+        self.assertEqual(tables[0].rows[0]["BoundsFile"], "BELMALE.BBX")
+        self.assertEqual(tables[1].rows[0]["TexPath"],
+                         ".\\CHARACTER\\PLAYER\\TEX\\")
+        self.assertEqual(tables[2].rows[0]["AniFile"], "BELMALE_IDLE_00.ANI")
+        self.assertEqual(build_var_tables(tables), payload)
+
+    def test_an_empty_table_is_four_bytes(self):
+        # Five of the 27 tables are empty in the live file, and an empty table
+        # still has to be read: it is what keeps the next count in step.
+        payload = self._table(self.BONE, []) + self._table(self.MESH, [])
+        tables = parse_var_tables(payload, self.RESOURCE[:2], "Resource.edf")
+        self.assertEqual([len(t.rows) for t in tables], [0, 0])
+        self.assertEqual(build_var_tables(tables), payload)
+
+    def test_the_animation_count_is_a_column_not_a_derived_number(self):
+        # 181 of the 16 976 animation records carry a count of 1 over an array
+        # whose first entry is 0. A zero is a value here, so the count must
+        # survive the round trip as written rather than be rebuilt from it.
+        payload = self._table(self.ANI, [
+            (16, 1, ".\\CHARACTER\\NPC\\ANI\\", "NPC_IDLE.ANI",
+             1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)])
+        tables = parse_var_tables(payload, [self.ANI], "Resource.edf")
+        self.assertEqual(tables[0].rows[0]["Unknown2"], 1)
+        self.assertEqual(tables[0].rows[0]["Unknown3"], 0)
+        self.assertEqual(build_var_tables(tables), payload)
+
+    def test_refuses_a_table_that_runs_past_the_payload(self):
+        payload = struct.pack("<I", 4096) + b"\x00" * 260
+        with self.assertRaises(EdfError):
+            parse_var_tables(payload, [self.BONE], "Resource.edf")
+
+    def test_a_name_may_not_outgrow_its_slot(self):
+        # zstr[64] is a fixed slot, so an over-long name is an error rather
+        # than a truncation -- every byte after it would move.
+        payload = self._table(self.BONE, [
+            (0, ".\\CHARACTER\\PLAYER\\BONE\\", "BELMALE.BN", "X.BBX")])
+        tables = parse_var_tables(payload, [self.BONE], "Resource.edf")
+        tables[0].rows[0]["BoneFile"] = "B" * 65
+        with self.assertRaises(EdfError):
+            build_var_tables(tables)
 
 
 if __name__ == "__main__":
