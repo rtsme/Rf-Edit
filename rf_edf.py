@@ -48,8 +48,18 @@ layout compiled into the client rather than written in the file, and several
 mix in length-prefixed strings, so their records are not even all the same
 size. BACKLOG #46 added the second model those need -- a hand-derived
 **grammar** per file (`EDF_TABLE_GRAMMARS`), an ordered field list where a
-field may be fixed-width or variable-width. Two files have one so far,
-`NDLanguage.edf` and `NDStore.edf`.
+field may be fixed-width or variable-width. `NDLanguage.edf` and
+`NDStore.edf` have one.
+
+BACKLOG #52 added the second grammar shape, for records that nest: a
+`BlockGrammar` is a block header, a count, and that many items of their own
+field list. `en-ph/Hint.edf` is one -- 67 hints, each a header and between one
+and seven separately coloured runs of text -- and it needs a `<u16 len>`
+string kind (`WPSTR`) that the flat grammars had no use for.
+`en-ph/UIHelp.edf` is the same runs of text again, in 55 such tables laid end
+to end. A block table
+writes two CSVs, blocks and items, joined by a `Block` column; the nested
+count is derived from the item rows, never carried in a column.
 
 BACKLOG #52 then found that two of the 13 left over are not a third structure
 at all: `en-ph/Exp.edf` and `en-ph/Player.edf` are the server's **plain .dat
@@ -60,7 +70,7 @@ is what makes them readable without disassembling anything: `parse_dat_tables`
 refuses unless a schema inferred from the record bytes alone comes out with
 exactly the number of fields the header declares.
 
-The remaining 11 stay opaque blobs until someone reads the client's reader for
+The remaining 9 stay opaque blobs until someone reads the client's reader for
 them: `--classify` says which file is which and why, and every parser here
 refuses rather than guessing, because a plausible-looking mis-parse would
 corrupt the file on write. See `docs/knowledge/edf-payload-tables.md` for the
@@ -84,12 +94,15 @@ Usage:
     from rf_edf import grammar_for, parse_var_tables, build_var_tables
         tables = parse_var_tables(payload, grammar_for("NDStore.edf"), "NDStore.edf")
         assert build_var_tables(tables) == payload
+        # Hint.edf reads the same way; its one table is a BlockTable, with
+        # `rows` the 67 hints and `items` their runs of text.
 
     from rf_edf import parse_dat_tables, build_dat_tables
         tables = parse_dat_tables(payload, "Player.edf")
         assert build_dat_tables(tables) == payload
 """
 import argparse
+import collections
 import csv
 import json
 import os
@@ -548,6 +561,21 @@ COUNT_HEADER_SIZE = struct.calcsize(COUNT_HEADER)
 # true statement.
 LPSTR = "lpstrz"
 
+# `<u16 len><len bytes>`, with **no** terminator inside the count -- the string
+# shape BACKLOG #52 derived in `Hint.edf`. A different contract from LPSTR's,
+# and deliberately a separate kind rather than a width option on it: over
+# there the terminator is what lets one string, on its own, say whether the
+# grammar fits. Here nothing does, so the claim rests entirely on the walk --
+# a field boundary wrong by one byte makes the next `<u16 len>` read garbage
+# and the table stops short of the last payload byte. The length is derived
+# from the text on write, exactly as LPSTR's is.
+WPSTR = "wpstr"
+
+# What a 2-byte prefix can say. Editing a string past it is an error rather
+# than a silent truncation: the record would rebuild short and every byte
+# after it would move.
+MAX_WPSTR = 0xFFFF
+
 # A fixed N-byte NUL-padded field, kept apart from rf_dat's `string[N]`
 # deliberately. `string[N]` decodes to the first NUL and re-encodes NUL-padded,
 # which is right for the server's `.dat` fields and wrong here: NDStore record
@@ -564,7 +592,7 @@ def field_width(ftype):
     m = _ZSTR_RE.match(ftype)
     if m:
         return int(m.group(1))
-    if ftype == LPSTR:
+    if ftype in (LPSTR, WPSTR):
         return None
     return field_size(ftype)
 
@@ -595,6 +623,16 @@ def read_field(data, pos, ftype, where):
                 "the grammar does not fit this file"
                 % (where, length, blob[:32]))
         return blob[:-1].decode("latin-1"), pos + length
+    if ftype == WPSTR:
+        if pos + 2 > len(data):
+            raise EdfError("%s: no room for the 2-byte length prefix" % where)
+        length = struct.unpack_from("<H", data, pos)[0]
+        pos += 2
+        if pos + length > len(data):
+            raise EdfError("%s: length prefix says %d bytes, %d past the end "
+                           "of the table"
+                           % (where, length, pos + length - len(data)))
+        return data[pos:pos + length].decode("latin-1"), pos + length
     width = field_size(ftype)
     if pos + width > len(data):
         raise EdfError("%s: %s runs %d byte(s) past the end of the table"
@@ -618,13 +656,19 @@ def write_field(value, ftype):
             raise ValueError("must not contain a NUL byte -- the terminator "
                              "is written for you")
         return struct.pack("<I", len(raw) + 1) + raw + b"\x00"
+    if ftype == WPSTR:
+        raw = str(value).encode("latin-1")
+        if len(raw) > MAX_WPSTR:
+            raise ValueError("too long: %d bytes, a 2-byte length prefix "
+                             "holds %d" % (len(raw), MAX_WPSTR))
+        return struct.pack("<H", len(raw)) + raw
     return encode(value, ftype)
 
 
 def parse_field(text, ftype):
     """Turn CSV text into a value `write_field` will accept, or raise."""
     m = _ZSTR_RE.match(ftype)
-    if m or ftype == LPSTR:
+    if m or ftype in (LPSTR, WPSTR):
         try:
             raw = text.encode("latin-1")
         except UnicodeEncodeError:
@@ -636,12 +680,36 @@ def parse_field(text, ftype):
         if ftype == LPSTR and b"\x00" in raw:
             raise ValueError("must not contain a NUL byte -- the terminator "
                              "is written for you")
+        if ftype == WPSTR and len(raw) > MAX_WPSTR:
+            raise ValueError("too long: %d bytes, a 2-byte length prefix "
+                             "holds %d" % (len(raw), MAX_WPSTR))
         return text
     return parse_value(text, ftype)
 
 
-def verify_grammar(grammar, source="grammar"):
-    """Reject a grammar that could not produce a usable CSV. Returns it."""
+# A **block** grammar: BACKLOG #52's second shape, for a table whose records
+# are not one flat field list but a header, a count, and that many nested
+# items -- Hint.edf's 67 hints, each a fixed header and between one and seven
+# coloured runs of text.
+#
+# The count is a field of the file and *not* a field of the grammar: it sits
+# between `block` and the items, and it is written from the number of item
+# rows rather than carried in a column. Same reason LPSTR's length is derived:
+# a number a person has to keep in step by hand is a number that eventually is
+# not, and here disagreeing with it would not truncate one string, it would
+# move every byte in the rest of the table.
+BlockGrammar = collections.namedtuple("BlockGrammar", "block count item")
+
+# What the item count may be. Anything wider is a record count, not an item
+# count, and reading one as the other would mean the shape was read wrong.
+BLOCK_COUNT_TYPES = ("ubyte", "uword", "udword")
+
+# The items CSV's first column: which block the row belongs to. It is the join
+# between the two files, so no item field may share the name.
+BLOCK_COLUMN = "Block"
+
+
+def _verify_fields(grammar, source):
     if not grammar:
         raise EdfError("%s: a grammar needs at least one field" % source)
     names = [n for n, _ in grammar]
@@ -652,6 +720,23 @@ def verify_grammar(grammar, source="grammar"):
     for _name, ftype in grammar:
         field_width(ftype)      # raises SchemaError on an unknown type
     return grammar
+
+
+def verify_grammar(grammar, source="grammar"):
+    """Reject a grammar that could not produce a usable CSV. Returns it."""
+    if isinstance(grammar, BlockGrammar):
+        if grammar.count not in BLOCK_COUNT_TYPES:
+            raise EdfError("%s: %r is not an item-count type (%s)"
+                           % (source, grammar.count,
+                              ", ".join(BLOCK_COUNT_TYPES)))
+        _verify_fields(grammar.block, "%s block header" % source)
+        _verify_fields(grammar.item, "%s item" % source)
+        if any(n == BLOCK_COLUMN for n, _ in grammar.item):
+            raise EdfError("%s: an item field may not be called %r -- that "
+                           "column carries the block number"
+                           % (source, BLOCK_COLUMN))
+        return grammar
+    return _verify_fields(grammar, source)
 
 
 # Hand-derived grammars, keyed by lowercase file name. Everything absent here
@@ -673,12 +758,123 @@ EDF_TABLE_GRAMMARS = {
         [("Id", "dword"), ("Name1", "zstr[64]"), ("Name2", "zstr[64]"),
          ("Text", LPSTR)],
     ],
+    # BACKLOG #52. <u32 67> then 67 hints; a hint is a 19-byte header, a <u8>
+    # count of text runs, and that many runs of 12 fixed bytes and a <u16 len>
+    # string. The walk closes exactly on the last of 8998 payload bytes, and
+    # it is the *only* one that does: sweeping header width 1..47 x count
+    # width 1/2/4 x run prefix 4..19 leaves this one layout standing, and the
+    # 67 it reads is the count the file declares at offset 0.
+    #
+    # What the search cannot pin is where one *fixed* field ends and the next
+    # begins, and that is a question of labels only -- any partition of the
+    # same fixed bytes rebuilds the same bytes. Two readings are still worth
+    # the names they carry:
+    #   - `Duration` -- 15000 in 66 of the 67 headers and 5000 in the other.
+    #     Round millisecond values, and the offset is forced: at any other
+    #     start those bytes are not a round number.
+    #   - the run's `Color*` -- ffffffff, 00ff00ff, 8000ffff, a0a0a0ff,
+    #     0000ffff, i.e. white / green / purple / grey / blue, always with an
+    #     opaque last byte. Four bytes that vary together as RGBA across both
+    #     this file and UIHelp.edf.
+    # Everything left is numbered rather than guessed at, the way NDStore's
+    # two names are. `Unknown3` is 0xCDCD in all 235 runs -- MSVC's
+    # uninitialised-stack fill, so it is a field the client writes and never
+    # sets, and one nobody should read meaning into.
+    "hint.edf": [
+        BlockGrammar(
+            block=[("Id", "dword"),
+                   ("ColorR", "ubyte"), ("ColorG", "ubyte"),
+                   ("ColorB", "ubyte"),
+                   ("Unknown1", "udword"), ("Duration", "udword"),
+                   ("Unknown2", "udword")],
+            count="ubyte",
+            item=[("Unknown1", "ubyte"), ("Unknown2", "ubyte"),
+                  ("Unknown3", "uword"),
+                  ("ColorR", "ubyte"), ("ColorG", "ubyte"),
+                  ("ColorB", "ubyte"), ("ColorA", "ubyte"),
+                  ("Unknown4", "dword"), ("Text", WPSTR)]),
+    ],
+    # BACKLOG #52. The same runs of text as Hint.edf, in 55 tables laid end to
+    # end -- one per UI window, and no count in front of them, so the number of
+    # tables is what the walk proves rather than something the file says: 54
+    # stops 1537 bytes short and 56 runs off the end.
+    #
+    # What says the table boundaries are right is `Index`. In each of the 20
+    # tables that has a bound block, that block's second field is the table's
+    # own position in the sequence -- 0, 1, 5, 6, 7, 9, ... 47 -- counting the
+    # 28 empty tables in between. Twenty independent agreements between a
+    # number in the file and a number only the walk knows; the same class of
+    # cross-check as NDStore.edf's 278 records matching Store.edf's. Table 54's
+    # nine blocks carry -1 in all three header fields: text bound to no window.
+    "uihelp.edf": [
+        BlockGrammar(
+            block=[("Id", "dword"), ("Index", "dword"),
+                   ("Unknown1", "dword")],
+            count="ubyte",
+            item=[("Unknown1", "ubyte"), ("Unknown2", "ubyte"),
+                  ("Unknown3", "uword"),
+                  ("ColorR", "ubyte"), ("ColorG", "ubyte"),
+                  ("ColorB", "ubyte"), ("ColorA", "ubyte"),
+                  ("Unknown4", "dword"), ("Text", WPSTR)]),
+    ] * 55,
 }
 
 
 def grammar_for(source):
     """The table grammars for a file name, or None if it has none."""
     return EDF_TABLE_GRAMMARS.get(os.path.basename(source).lower())
+
+
+def _write_csv(path, header, rows):
+    """One line per record, ASCII-only, LF endings -- as rf_dat.Table."""
+    with open(path, "w", newline="", encoding="ascii") as f:
+        w = csv.writer(f, lineterminator="\n")
+        w.writerow(header)
+        for row in rows:
+            w.writerow(row)
+
+
+def _read_csv(path, grammar, lead=None):
+    """Read a CSV whose columns are exactly `grammar`, after an optional
+    leading `lead` column of integers. Returns `(lead values, rows)`.
+    """
+    where = os.path.basename(path)
+    expected = ([lead] if lead else []) + [n for n, _ in grammar]
+    leads, rows = [], []
+    with open(path, "r", newline="", encoding="ascii") as f:
+        reader = csv.reader(f)
+        try:
+            header = next(reader)
+        except StopIteration:
+            raise ValueError("%s is empty" % where)
+        if header != expected:
+            raise ValueError(
+                "%s: columns don't match the grammar.\nexpected %d columns "
+                "starting %s\ngot %d columns starting %s\nColumns must not "
+                "be added, removed or reordered -- they are the record "
+                "layout." % (where, len(expected), expected[:4],
+                             len(header), header[:4]))
+        for i, rec in enumerate(reader):
+            if len(rec) != len(expected):
+                raise ValueError("%s line %d: has %d values, expected %d"
+                                 % (where, i + 2, len(rec), len(expected)))
+            if lead:
+                try:
+                    leads.append(int(rec[0]))
+                except ValueError:
+                    raise ValueError("%s line %d, column %s: %r is not a "
+                                     "block number"
+                                     % (where, i + 2, lead, rec[0]))
+                rec = rec[1:]
+            row = {}
+            for (name, ftype), text in zip(grammar, rec):
+                try:
+                    row[name] = parse_field(unescape_text(text), ftype)
+                except ValueError as exc:
+                    raise ValueError("%s line %d, column %s: %s"
+                                     % (where, i + 2, name, exc))
+            rows.append(row)
+    return leads, rows
 
 
 class VarTable(object):
@@ -742,44 +938,152 @@ class VarTable(object):
         return t
 
     def export_csv(self, path):
-        """One line per record, ASCII-only, LF endings -- as rf_dat.Table."""
         names = [n for n, _ in self.grammar]
-        with open(path, "w", newline="", encoding="ascii") as f:
-            w = csv.writer(f, lineterminator="\n")
-            w.writerow(names)
-            for row in self.rows:
-                w.writerow([escape_text(str(row[n])) for n in names])
+        _write_csv(path, names,
+                   ([escape_text(str(row[n])) for n in names]
+                    for row in self.rows))
 
     def import_csv(self, path):
-        where = os.path.basename(path)
-        with open(path, "r", newline="", encoding="ascii") as f:
-            reader = csv.reader(f)
-            try:
-                header = next(reader)
-            except StopIteration:
-                raise ValueError("%s is empty" % where)
-            expected = [n for n, _ in self.grammar]
-            if header != expected:
-                raise ValueError(
-                    "%s: columns don't match the grammar.\nexpected %d columns "
-                    "starting %s\ngot %d columns starting %s\nColumns must not "
-                    "be added, removed or reordered -- they are the record "
-                    "layout." % (where, len(expected), expected[:4],
-                                 len(header), header[:4]))
-            rows = []
-            for i, rec in enumerate(reader):
-                if len(rec) != len(expected):
-                    raise ValueError("%s line %d: has %d values, expected %d"
-                                     % (where, i + 2, len(rec), len(expected)))
-                row = {}
-                for (name, ftype), text in zip(self.grammar, rec):
-                    try:
-                        row[name] = parse_field(unescape_text(text), ftype)
-                    except ValueError as exc:
-                        raise ValueError("%s line %d, column %s: %s"
-                                         % (where, i + 2, name, exc))
-                rows.append(row)
+        _leads, rows = _read_csv(path, self.grammar)
         self.rows = rows
+        return rows
+
+
+class BlockTable(object):
+    """One count-only table whose records nest a second, counted list.
+
+    `<u32 block_count>`, then per block the header fields, an item count, and
+    that many items. Two levels, so two CSVs: the blocks in the file the
+    caller names and the items beside it as `<name>.items.csv`, joined by a
+    `Block` column. Flattening them into one file would mean repeating every
+    header value on every item row, and a file where the same fact is written
+    many times is a file where an edit can disagree with itself.
+
+    Item order inside a block is byte order, so the items CSV is read in the
+    order it is written: rows must stay grouped and in block order, and the
+    importer says so rather than quietly reshuffling the payload.
+    """
+
+    def __init__(self, grammar, rows, items, source=None, grammar_source=None):
+        self.grammar = verify_grammar(grammar, source or "grammar")
+        if len(rows) != len(items):
+            raise EdfError("%s: %d block(s) but %d item list(s)"
+                           % (source or "table", len(rows), len(items)))
+        self.rows = rows
+        self.items = items
+        self.source = source
+        self.grammar_source = grammar_source
+
+    @staticmethod
+    def items_path(path):
+        """Where the item rows live, given the block CSV's path."""
+        base, ext = os.path.splitext(path)
+        return base + ".items" + (ext or ".csv")
+
+    @classmethod
+    def parse(cls, data, offset, grammar, source):
+        """Read `<u32 count>` and its blocks at `offset`.
+
+        Returns the table and the offset just past it.
+        """
+        verify_grammar(grammar, source)
+        if offset + COUNT_HEADER_SIZE > len(data):
+            raise EdfError("%s: %d byte(s) left, too few for a 4-byte block "
+                           "count" % (source, len(data) - offset))
+        count = struct.unpack_from(COUNT_HEADER, data, offset)[0]
+        pos = offset + COUNT_HEADER_SIZE
+        if count > MAX_RECORD_COUNT:
+            raise EdfError("%s: reads as %d blocks, which is not a block "
+                           "count" % (source, count))
+        rows, items = [], []
+        for i in range(count):
+            row = {}
+            for name, ftype in grammar.block:
+                row[name], pos = read_field(
+                    data, pos, ftype,
+                    "%s block %d field %s" % (source, i, name))
+            n, pos = read_field(data, pos, grammar.count,
+                                "%s block %d item count" % (source, i))
+            if n < 0 or n > MAX_RECORD_COUNT:
+                raise EdfError("%s block %d: reads as %d items, which is not "
+                               "an item count" % (source, i, n))
+            group = []
+            for j in range(n):
+                item = {}
+                for name, ftype in grammar.item:
+                    item[name], pos = read_field(
+                        data, pos, ftype,
+                        "%s block %d item %d field %s" % (source, i, j, name))
+                group.append(item)
+            rows.append(row)
+            items.append(group)
+        return cls(grammar, rows, items, source=source,
+                   grammar_source="hand-derived (EDF_TABLE_GRAMMARS)"), pos
+
+    def to_bytes(self):
+        where = self.source or "table"
+        out = bytearray(struct.pack(COUNT_HEADER, len(self.rows)))
+        for i, (row, group) in enumerate(zip(self.rows, self.items)):
+            for name, ftype in self.grammar.block:
+                try:
+                    out += write_field(row[name], ftype)
+                except ValueError as exc:
+                    raise EdfError("%s block %d field %s: %s"
+                                   % (where, i, name, exc))
+            try:
+                out += write_field(len(group), self.grammar.count)
+            except (ValueError, struct.error):
+                raise EdfError("%s block %d: %d items is more than this "
+                               "file's %s item count can hold"
+                               % (where, i, len(group), self.grammar.count))
+            for j, item in enumerate(group):
+                for name, ftype in self.grammar.item:
+                    try:
+                        out += write_field(item[name], ftype)
+                    except ValueError as exc:
+                        raise EdfError("%s block %d item %d field %s: %s"
+                                       % (where, i, j, name, exc))
+        return bytes(out)
+
+    @classmethod
+    def from_csv(cls, csv_path, grammar):
+        t = cls(grammar, [], [], source=os.path.basename(csv_path),
+                grammar_source=os.path.basename(csv_path))
+        t.import_csv(csv_path)
+        return t
+
+    def export_csv(self, path):
+        names = [n for n, _ in self.grammar.block]
+        _write_csv(path, names,
+                   ([escape_text(str(row[n])) for n in names]
+                    for row in self.rows))
+        inames = [n for n, _ in self.grammar.item]
+        _write_csv(self.items_path(path), [BLOCK_COLUMN] + inames,
+                   ([str(i)] + [escape_text(str(item[n])) for n in inames]
+                    for i, group in enumerate(self.items) for item in group))
+
+    def import_csv(self, path):
+        _leads, rows = _read_csv(path, self.grammar.block)
+        ipath = self.items_path(path)
+        leads, items = _read_csv(ipath, self.grammar.item, lead=BLOCK_COLUMN)
+        where = os.path.basename(ipath)
+        groups = [[] for _ in rows]
+        last = -1
+        for i, (block, item) in enumerate(zip(leads, items)):
+            if not 0 <= block < len(rows):
+                raise ValueError("%s line %d: block %d, but %s has %d block(s)"
+                                 % (where, i + 2, block,
+                                    os.path.basename(path), len(rows)))
+            if block < last:
+                raise ValueError(
+                    "%s line %d: block %d after block %d -- item rows are "
+                    "written back in the order they appear, so they must stay "
+                    "grouped and in block order"
+                    % (where, i + 2, block, last))
+            last = block
+            groups[block].append(item)
+        self.rows = rows
+        self.items = groups
         return rows
 
 
@@ -793,7 +1097,8 @@ def parse_var_tables(payload, grammars, source="EDF payload"):
     tables = []
     offset = 0
     for i, grammar in enumerate(grammars):
-        table, offset = VarTable.parse(
+        reader = BlockTable if isinstance(grammar, BlockGrammar) else VarTable
+        table, offset = reader.parse(
             payload, offset, grammar, "%s#%d" % (source, i))
         tables.append(table)
     if offset != len(payload):
@@ -813,42 +1118,68 @@ def build_var_tables(tables):
     return bytes(out)
 
 
+def _layout_doc(fields, prefix=""):
+    widths = [field_width(t) for _, t in fields]
+    return {
+        prefix + "field_count": len(fields),
+        prefix + "fixed_bytes": sum(w for w in widths if w is not None),
+        prefix + "variable_fields": sum(1 for w in widths if w is None),
+        prefix + "fields": [{"name": n, "type": t} for n, t in fields],
+    }
+
+
 def write_grammar_json(grammar, path, table_name="", source=""):
     """Freeze a grammar beside its CSV, as write_schema_json does a schema.
 
     `fixed_bytes` and `variable_fields` are redundant with the field list on
     purpose: a hand-edit that breaks the layout is caught on read rather than
-    rebuilding a plausible-looking wrong payload.
+    rebuilding a plausible-looking wrong payload. A block grammar freezes both
+    of its field lists and the width of the item count between them, for the
+    same reason -- there are more numbers to get wrong, not fewer.
     """
-    widths = [field_width(t) for _, t in grammar]
-    doc = {
-        "table": table_name,
-        "grammar_source": source,
-        "field_count": len(grammar),
-        "fixed_bytes": sum(w for w in widths if w is not None),
-        "variable_fields": sum(1 for w in widths if w is None),
-        "fields": [{"name": n, "type": t} for n, t in grammar],
-    }
+    doc = {"table": table_name, "grammar_source": source}
+    if isinstance(grammar, BlockGrammar):
+        doc["kind"] = "block"
+        doc["item_count_type"] = grammar.count
+        doc.update(_layout_doc(grammar.block))
+        doc.update(_layout_doc(grammar.item, "item_"))
+    else:
+        doc["kind"] = "flat"
+        doc.update(_layout_doc(grammar))
     with open(path, "w", encoding="ascii", newline="\n") as f:
         json.dump(doc, f, indent=1)
         f.write("\n")
 
 
+def _read_layout(doc, where, prefix=""):
+    fields = [(fld["name"], fld["type"]) for fld in doc[prefix + "fields"]]
+    _verify_fields(fields, where)
+    widths = [field_width(t) for _, t in fields]
+    fixed = sum(w for w in widths if w is not None)
+    variable = sum(1 for w in widths if w is None)
+    if (len(fields) != doc[prefix + "field_count"]
+            or fixed != doc[prefix + "fixed_bytes"]
+            or variable != doc[prefix + "variable_fields"]):
+        raise EdfError(
+            "%s is inconsistent: the %sfields list gives %d fields / %d fixed "
+            "bytes / %d variable, the header says %d / %d / %d"
+            % (where, prefix, len(fields), fixed, variable,
+               doc[prefix + "field_count"], doc[prefix + "fixed_bytes"],
+               doc[prefix + "variable_fields"]))
+    return fields
+
+
 def read_grammar_json(path):
     with open(path, "r", encoding="ascii") as f:
         doc = json.load(f)
-    grammar = [(fld["name"], fld["type"]) for fld in doc["fields"]]
-    verify_grammar(grammar, os.path.basename(path))
-    widths = [field_width(t) for _, t in grammar]
-    fixed = sum(w for w in widths if w is not None)
-    variable = sum(1 for w in widths if w is None)
-    if (len(grammar) != doc["field_count"] or fixed != doc["fixed_bytes"]
-            or variable != doc["variable_fields"]):
-        raise EdfError(
-            "%s is inconsistent: the fields list gives %d fields / %d fixed "
-            "bytes / %d variable, the header says %d / %d / %d"
-            % (os.path.basename(path), len(grammar), fixed, variable,
-               doc["field_count"], doc["fixed_bytes"], doc["variable_fields"]))
+    where = os.path.basename(path)
+    if doc.get("kind") == "block":
+        grammar = BlockGrammar(_read_layout(doc, where),
+                               doc["item_count_type"],
+                               _read_layout(doc, where, "item_"))
+    else:
+        grammar = _read_layout(doc, where)
+    verify_grammar(grammar, where)
     return grammar, doc
 
 def _csv_round_trip(tables, name, tmp, build):
@@ -866,12 +1197,12 @@ def _csv_round_trip(tables, name, tmp, build):
         csv_path = os.path.join(tmp, "%02d.csv" % i)
         layout_path = os.path.join(tmp, "%02d.json" % i)
         table.export_csv(csv_path)
-        if isinstance(table, VarTable):
+        if isinstance(table, (VarTable, BlockTable)):
             write_grammar_json(table.grammar, layout_path,
                                table_name="%s#%d" % (name, i),
                                source=table.grammar_source)
             grammar, _doc = read_grammar_json(layout_path)
-            rebuilt.append(VarTable.from_csv(csv_path, grammar))
+            rebuilt.append(type(table).from_csv(csv_path, grammar))
         else:
             write_schema_json(table.schema, layout_path,
                               dat_name="%s#%d" % (name, i),
@@ -1010,7 +1341,9 @@ def main(argv=None):
                 grammars += 1
                 print("GRAMMR %-28s %8d bytes  %2d table(s)  %s"
                       % (name, len(payload), len(tables),
-                         ", ".join("%d rec" % len(t.rows) for t in tables)))
+                         ", ".join("%d rec" % len(t.rows)
+                                   for t in tables[:6])
+                         + (", ..." if len(tables) > 6 else "")))
                 continue
             layout, why = classify(payload, name)
             if layout:

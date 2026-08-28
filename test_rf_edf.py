@@ -19,7 +19,8 @@ import unittest
 from rf_dat import SchemaError, Table, infer_schema
 from rf_edf import (CHAIN_HEADER, DAT_HEADER, EDF_MIN_TEXT_SHARE,
                     EDF_STRING_WIDTHS, EDF_TABLE_GRAMMARS, KEY_LENGTH, MAGIC,
-                    EdfError, VarTable, build_dat_tables, build_table_chain,
+                    MAX_WPSTR, WPSTR, BlockGrammar, BlockTable, EdfError,
+                    VarTable, build_dat_tables, build_table_chain,
                     build_var_tables, chain_layout, classify, dat_layout,
                     decrypt, encrypt, grammar_for, parse_dat_tables,
                     parse_table_chain, parse_var_tables, read_grammar_json,
@@ -403,10 +404,12 @@ class VariableRecordTests(unittest.TestCase):
     def test_registry_covers_only_what_is_proven(self):
         self.assertIsNotNone(grammar_for("NDLanguage.edf"))
         self.assertIsNotNone(grammar_for(r"DataTable\en-ph\NDStore.edf"))
+        self.assertIsNotNone(grammar_for("Hint.edf"))
+        self.assertIsNotNone(grammar_for("UIHelp.edf"))
         # Everything else is still an opaque blob, and must stay one until
         # its grammar is derived rather than guessed.
         self.assertIsNone(grammar_for("Item.edf"))
-        self.assertIsNone(grammar_for("UIHelp.edf"))
+        self.assertIsNone(grammar_for("NDItem.edf"))
         for name, grammars in EDF_TABLE_GRAMMARS.items():
             for grammar in grammars:
                 verify_grammar(grammar, name)
@@ -420,6 +423,190 @@ class VariableRecordTests(unittest.TestCase):
         self.assertEqual([r["Text"] for r in tables[0].rows],
                          ["Bellato", "Cora", "Accretia"])
         self.assertEqual(build_var_tables(tables), payload)
+
+
+class BlockRecordTests(unittest.TestCase):
+    """BACKLOG #52: records that nest a second, separately counted list.
+
+    The grammar under test is the real `Hint.edf` one -- a fixed header, a
+    `<u8>` count of text runs, and runs of fixed bytes plus a `<u16 len>`
+    string -- because it exercises both new pieces at once.
+    """
+
+    HINT = EDF_TABLE_GRAMMARS["hint.edf"]
+    G = HINT[0]
+
+    def _block(self, hint_id, runs):
+        out = (struct.pack("<i", hint_id) + bytes((0, 0x32, 0xFF))
+               + struct.pack("<III", 0, 15000, 1) + struct.pack("<B", len(runs)))
+        for colour, text in runs:
+            out += (bytes((0x20, 7)) + struct.pack("<H", 0xCDCD) + colour
+                    + struct.pack("<i", -1)
+                    + struct.pack("<H", len(text)) + text)
+        return out
+
+    def _payload(self, blocks):
+        out = struct.pack("<I", len(blocks))
+        for hint_id, runs in blocks:
+            out += self._block(hint_id, runs)
+        return out
+
+    WHITE = b"\xff\xff\xff\xff"
+    GREEN = b"\x00\xff\x00\xff"
+
+    def test_round_trip(self):
+        payload = self._payload([
+            (10, [(self.WHITE, b"To control camera view, "),
+                  (self.GREEN, b"click mouse right button")]),
+            (20, [(self.WHITE, b"To zoom, use the wheel.")]),
+        ])
+        tables = parse_var_tables(payload, self.HINT, "Hint.edf")
+        self.assertEqual(len(tables), 1)
+        self.assertIsInstance(tables[0], BlockTable)
+        self.assertEqual([r["Id"] for r in tables[0].rows], [10, 20])
+        self.assertEqual([len(g) for g in tables[0].items], [2, 1])
+        self.assertEqual(tables[0].rows[0]["Duration"], 15000)
+        self.assertEqual(tables[0].items[0][1]["Text"], "click mouse right button")
+        self.assertEqual(tables[0].items[0][1]["ColorG"], 0xFF)
+        self.assertEqual(build_var_tables(tables), payload)
+
+    def test_item_count_is_derived_not_stored(self):
+        # It is not a column, so a hand edit cannot leave it disagreeing with
+        # the rows -- and disagreeing here does not truncate one string, it
+        # moves every byte in the rest of the table.
+        self.assertNotIn("Count", [n for n, _ in self.G.block])
+        payload = self._payload([(10, [(self.WHITE, b"one")])])
+        tables = parse_var_tables(payload, self.HINT, "Hint.edf")
+        tables[0].items[0].append(dict(tables[0].items[0][0], Text="two"))
+        self.assertEqual(build_var_tables(tables), self._payload(
+            [(10, [(self.WHITE, b"one"), (self.WHITE, b"two")])]))
+
+    def test_wpstr_length_is_derived_and_carries_any_byte(self):
+        payload = self._payload([(10, [(self.WHITE, b"short")])])
+        tables = parse_var_tables(payload, self.HINT, "Hint.edf")
+        tables[0].items[0][0]["Text"] = "a considerably longer replacement"
+        self.assertEqual(build_var_tables(tables), self._payload(
+            [(10, [(self.WHITE, b"a considerably longer replacement")])]))
+        # Unlike LPSTR there is no terminator, so a NUL is data, not a
+        # boundary, and has to survive the trip.
+        odd = self._payload([(10, [(self.WHITE, b"a\x00b\xa1\xaf")])])
+        tables = parse_var_tables(odd, self.HINT, "Hint.edf")
+        self.assertEqual(build_var_tables(tables), odd)
+
+    def test_refuses_a_string_longer_than_its_prefix(self):
+        payload = self._payload([(10, [(self.WHITE, b"x")])])
+        tables = parse_var_tables(payload, self.HINT, "Hint.edf")
+        tables[0].items[0][0]["Text"] = "x" * (MAX_WPSTR + 1)
+        with self.assertRaises(EdfError):
+            build_var_tables(tables)
+
+    def test_refuses_a_grammar_that_does_not_close(self):
+        payload = self._payload([(10, [(self.WHITE, b"x")])])
+        with self.assertRaises(EdfError):
+            parse_var_tables(payload + b"\x00", self.HINT, "Hint.edf")
+        with self.assertRaises(EdfError):
+            parse_var_tables(payload[:-1], self.HINT, "Hint.edf")
+
+    def test_csv_round_trip_writes_blocks_and_items(self):
+        payload = self._payload([
+            (10, [(self.WHITE, b"To control camera view, "),
+                  (self.GREEN, b"click, \\ then move.")]),
+            (-1, []),
+            (20, [(self.WHITE, b"To zoom, use the wheel.")]),
+        ])
+        tables = parse_var_tables(payload, self.HINT, "Hint.edf")
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = os.path.join(tmp, "t.csv")
+            json_path = os.path.join(tmp, "t.json")
+            tables[0].export_csv(csv_path)
+            items_path = BlockTable.items_path(csv_path)
+            self.assertTrue(os.path.exists(items_path))
+            with open(items_path, encoding="ascii") as f:
+                head = f.read().splitlines()
+            self.assertEqual(head[0].split(",")[0], "Block")
+            # A block with no items contributes no item rows, and still comes
+            # back as a block.
+            self.assertEqual([line.split(",")[0] for line in head[1:]],
+                             ["0", "0", "2"])
+            write_grammar_json(tables[0].grammar, json_path,
+                               table_name="Hint.edf#0",
+                               source=tables[0].grammar_source)
+            grammar, doc = read_grammar_json(json_path)
+            self.assertEqual(grammar, self.G)
+            self.assertEqual(doc["kind"], "block")
+            self.assertEqual(doc["item_count_type"], "ubyte")
+            self.assertEqual(doc["fixed_bytes"], 19)
+            self.assertEqual(doc["item_fixed_bytes"], 12)
+            self.assertEqual(doc["item_variable_fields"], 1)
+            rebuilt = BlockTable.from_csv(csv_path, grammar)
+        self.assertEqual([len(g) for g in rebuilt.items], [2, 0, 1])
+        self.assertEqual(build_var_tables([rebuilt]), payload)
+
+    def _export(self, tmp, payload):
+        tables = parse_var_tables(payload, self.HINT, "Hint.edf")
+        csv_path = os.path.join(tmp, "t.csv")
+        tables[0].export_csv(csv_path)
+        return csv_path, BlockTable.items_path(csv_path)
+
+    def _rewrite(self, path, edit):
+        with open(path, encoding="ascii") as f:
+            lines = f.read().splitlines()
+        with open(path, "w", encoding="ascii", newline="\n") as f:
+            f.write("\n".join(edit(lines)) + "\n")
+
+    def test_items_csv_rejects_a_block_that_is_not_there(self):
+        payload = self._payload([(10, [(self.WHITE, b"x")])])
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path, items_path = self._export(tmp, payload)
+            self._rewrite(items_path,
+                          lambda ls: [ls[0], "7" + ls[1][1:]])
+            with self.assertRaises(ValueError):
+                BlockTable.from_csv(csv_path, self.G)
+
+    def test_items_csv_rejects_rows_out_of_block_order(self):
+        # Order inside a block is byte order; reshuffling the file quietly
+        # would reshuffle the payload.
+        payload = self._payload([(10, [(self.WHITE, b"x")]),
+                                 (20, [(self.WHITE, b"y")])])
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path, items_path = self._export(tmp, payload)
+            self._rewrite(items_path, lambda ls: [ls[0], ls[2], ls[1]])
+            with self.assertRaises(ValueError):
+                BlockTable.from_csv(csv_path, self.G)
+
+    def test_verify_grammar_rejects_a_block_grammar_that_cannot_work(self):
+        with self.assertRaises(EdfError):        # count too wide to be one
+            verify_grammar(BlockGrammar([("A", "dword")], "qword",
+                                        [("B", "dword")]))
+        with self.assertRaises(EdfError):        # Block is the join column
+            verify_grammar(BlockGrammar([("A", "dword")], "ubyte",
+                                        [("Block", "dword")]))
+        with self.assertRaises(EdfError):        # no item fields at all
+            verify_grammar(BlockGrammar([("A", "dword")], "ubyte", []))
+        verify_grammar(BlockGrammar([("A", "dword")], "ubyte",
+                                    [("Text", WPSTR)]))
+
+    def test_grammar_json_catches_a_hand_edit_to_the_item_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "t.json")
+            write_grammar_json(self.G, json_path)
+            with open(json_path, encoding="ascii") as f:
+                doc = json.load(f)
+            doc["item_fields"][0]["type"] = "udword"   # 1 byte becomes 4
+            with open(json_path, "w", encoding="ascii", newline="\n") as f:
+                json.dump(doc, f)
+            with self.assertRaises(EdfError):
+                read_grammar_json(json_path)
+
+    def test_uihelp_is_the_same_table_repeated(self):
+        # 55 tables end to end and no count in front of them: the number of
+        # them is what the walk proves, so it has to stay a list of that many
+        # identical grammars rather than a single one.
+        grammars = grammar_for("UIHelp.edf")
+        self.assertEqual(len(grammars), 55)
+        self.assertEqual(len(set(id(g) for g in grammars)), 1)
+        self.assertIsInstance(grammars[0], BlockGrammar)
+
 
 if __name__ == "__main__":
     unittest.main()
