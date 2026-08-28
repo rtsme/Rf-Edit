@@ -459,9 +459,18 @@ def diff_repo(repo, server_root=None, progress=None):
 
 
 def diff_files(repo, server_root, manifest):
-    """Compare the verbatim copies in repo/files/ against the server."""
+    """Compare the verbatim copies in repo/files/ against the server.
+
+    A key also listed in manifest["secrets"] is a real credential file
+    deliberately left out of repo/files/ (rule 12: secrets never enter git,
+    only .example templates are tracked) - it is not a broken table, so it
+    is skipped here rather than reported as ERROR and blocking every build.
+    """
     out = []
+    secrets = manifest.get("secrets", {})
     for key in sorted(manifest.get("files", {})):
+        if key in secrets:
+            continue
         native = key.replace("/", os.sep)
         repo_path = os.path.join(repo, "files", native)
         live_path = os.path.join(server_root, native)
