@@ -881,6 +881,47 @@ def pool_record_size(grammar):
             + field_size(grammar.count))
 
 
+# A **nest** grammar: BACKLOG #52's sixth shape, and the widest of them -- a
+# block with *several* nested runs rather than one. Map.edf is why it exists.
+# One of its map blocks carries four: the 288-byte spawn records, a parallel
+# array of portal links, the placed objects only `resources` has, and the
+# named passages -- and then 76 bytes of block-level fixed fields *after* all
+# of them. BlockGrammar reaches exactly one run and has nothing after it, so
+# stretching it would have meant making its single `item` list optional and
+# repeatable on the settled path Hint.edf and UIHelp.edf depend on.
+#
+# `head` is the fields before the first run, `tail` the fields after the last
+# (possibly empty), and `runs` the nested lists in file order. Each run says
+# how its length is written, and none of the three ways is a CSV column --
+# same reason BlockGrammar's count is not one. Getting a nested length wrong
+# does not truncate one record, it moves every byte after it.
+NestRun = collections.namedtuple("NestRun", "name count fields")
+NestGrammar = collections.namedtuple("NestGrammar", "head runs tail")
+
+# `count` may be:
+#   one of BLOCK_COUNT_TYPES -- the run writes its own count in front of it;
+#   SAME_COUNT               -- the run has no count of its own and is exactly
+#                               as long as the run before it. Map.edf's link
+#                               array is this: the file states one number and
+#                               two arrays follow it, so a link belongs to the
+#                               spawn record at the same index and there is
+#                               nothing for a second count to be;
+#   BYTE_LENGTH              -- the run writes a `<u32>` *byte* length rather
+#                               than a record count. Map.edf's minimap cells
+#                               are this. The records must then be fixed-width
+#                               so the two convert, and the reader refuses a
+#                               length that is not a whole number of them.
+SAME_COUNT = "same"
+BYTE_LENGTH = "bytes"
+BYTE_LENGTH_FORMAT = "<I"
+BYTE_LENGTH_SIZE = struct.calcsize(BYTE_LENGTH_FORMAT)
+
+
+def nest_run_size(run):
+    """Bytes one record of a BYTE_LENGTH run occupies."""
+    return sum(field_width(t) for _, t in run.fields)
+
+
 def _verify_fields(grammar, source):
     if not grammar:
         raise EdfError("%s: a grammar needs at least one field" % source)
@@ -928,6 +969,42 @@ def verify_grammar(grammar, source="grammar"):
             raise EdfError("%s: the pooled string may not be called %r -- "
                            "that column carries the record number"
                            % (source, BLOCK_COLUMN))
+        return grammar
+    if isinstance(grammar, NestGrammar):
+        _verify_fields(grammar.head, "%s block header" % source)
+        if not grammar.runs:
+            raise EdfError("%s: a nested grammar with no runs is a flat one -- "
+                           "use a plain field list" % source)
+        seen = set()
+        for pos, run in enumerate(grammar.runs):
+            where = "%s run %s" % (source, run.name)
+            if not run.name or run.name in seen:
+                raise EdfError("%s: run name %r is missing or repeated -- each "
+                               "run gets its own CSV beside the block one"
+                               % (source, run.name))
+            seen.add(run.name)
+            if run.count == SAME_COUNT:
+                if pos == 0:
+                    raise EdfError("%s: the first run has no run before it to "
+                                   "take its length from" % where)
+            elif run.count == BYTE_LENGTH:
+                for name, ftype in run.fields:
+                    if field_width(ftype) is None:
+                        raise EdfError(
+                            "%s: field %s is variable-width, and a run measured "
+                            "in bytes cannot say how many records that is"
+                            % (where, name))
+            elif run.count not in BLOCK_COUNT_TYPES:
+                raise EdfError("%s: %r is not a record-count type (%s, %s, %s)"
+                               % (where, run.count, ", ".join(BLOCK_COUNT_TYPES),
+                                  SAME_COUNT, BYTE_LENGTH))
+            _verify_fields(run.fields, where)
+            if any(n == BLOCK_COLUMN for n, _ in run.fields):
+                raise EdfError("%s: a field may not be called %r -- that column "
+                               "carries the block number" % (where, BLOCK_COLUMN))
+        if grammar.tail:
+            _verify_fields(grammar.head + grammar.tail,
+                           "%s block header and trailer" % source)
         return grammar
     if isinstance(grammar, BlockGrammar):
         if grammar.count not in BLOCK_COUNT_TYPES:
@@ -1237,6 +1314,91 @@ EDF_TABLE_GRAMMARS = {
          ("AniFile", "zstr[64]"), ("Unknown2", "dword")]
         + [("Unknown%d" % (i + 3), "dword") for i in range(10)],
     ] * 9,
+    # BACKLOG #52, seventh session. Three tables: the 37 map blocks, then the
+    # 31 world minimaps, then the 7 world-map insets. The blocks were already
+    # found (each opens with its own index, 0..36 in file order) and their
+    # 298-byte header read; what this session derived is everything after it.
+    #
+    # A block's `count` covers *two* runs -- the 288-byte spawn/portal records
+    # and, after all of them, one dword pair per record. The pair is a link:
+    # 219 of the 436 are not (-1, -1), and every one of those 219 names a real
+    # (map index, record index) in this same file, which is what says the two
+    # arrays are parallel rather than one array of some other length.
+    #
+    # Three things inside the 288-byte record agree with numbers only the walk
+    # knows: field 1 is the owning block's index in all 436 records, field 2 is
+    # the record's index inside its block in all 436, and the 16 floats at +32
+    # have 0, 0, 0, 1.0 in the places a 4x4 affine transform's last column
+    # holds them -- so the bounding box and matrix are read, not guessed at.
+    # The 96-byte `areas` run is the same geometry without the name or the
+    # flags, and only `resources` has any (226 of them; the other 36 blocks
+    # write a zero count).
+    #
+    # A minimap's cells are `<u32 byte length>` then `<u16 repeat><u8 value>`
+    # triplets, a run being `repeat + 1` cells long. Across all 38 grids the
+    # cells add up to exactly `Width * Height` -- 26 283 runs agreeing with a
+    # number the record states separately, which is what proves the triplet.
+    "map.edf": [
+        NestGrammar(
+            [("Id", "dword"), ("Name", "zstr[32]"), ("BspPath", "zstr[128]"),
+             ("SprFile", "zstr[128]"), ("Unknown1", "uword")],
+            [
+                # the spawn and portal entries: `dpgoto_bellato_HQ`,
+                # `dpfrom_bl_grsd`, each with a world bounding box and a
+                # placement matrix
+                NestRun("records", "udword",
+                        [("MapIndex", "dword"), ("Index", "dword"),
+                         ("MinX", "float"), ("MinY", "float"),
+                         ("MinZ", "float"), ("MaxX", "float"),
+                         ("MaxY", "float"), ("MaxZ", "float")]
+                        + [("M%d%d" % (r, c), "float")
+                           for r in range(4) for c in range(4)]
+                        + [("Unknown1", "dword"), ("Unknown2", "dword"),
+                           ("Unknown3", "dword"), ("Unknown4", "ubyte"),
+                           ("Name", "zstr[128]"), ("Unknown5", "ubyte"),
+                           ("Unknown6", "ubyte"), ("Unknown7", "ubyte")]
+                        + [("Unknown%d" % (i + 8), "dword")
+                           for i in range(12)]),
+                # where each of those records leads, or (-1, -1) for nowhere
+                NestRun("links", SAME_COUNT,
+                        [("ToMap", "dword"), ("ToRecord", "dword")]),
+                # placed objects: a bounding box and a transform, no name
+                NestRun("areas", "udword",
+                        [("Unknown1", "dword"), ("Unknown2", "dword"),
+                         ("MinX", "float"), ("MinY", "float"),
+                         ("MinZ", "float"), ("MaxX", "float"),
+                         ("MaxY", "float"), ("MaxZ", "float")]
+                        + [("M%d%d" % (r, c), "float")
+                           for r in range(4) for c in range(4)]),
+                # the named passages: `Road to Beast Mountain`. `Index` is not
+                # per block -- it runs 0..125 across the whole file.
+                NestRun("passages", "udword",
+                        [("Index", "dword"), ("Unknown1", "dword"),
+                         ("Unknown2", "dword"), ("Unknown3", "dword"),
+                         ("Unknown4", "dword"), ("Name", "zstr[64]")]),
+            ],
+            # 19 dwords after the last run. Unknown15 and Unknown16 are N and
+            # N - 1 in all 37 blocks, whatever N counts.
+            [("Unknown2", "float")]
+            + [("Unknown%d" % (i + 3), "dword") for i in range(4)]
+            + [("Unknown7", "float")]
+            + [("Unknown%d" % (i + 8), "dword") for i in range(13)]),
+    ] + [
+        NestGrammar(
+            [("Width", "dword"), ("Height", "dword"), ("Name", LPSTR)],
+            [
+                # icons on the minimap. All 245 land inside their own grid
+                # read this way round and 19 do not read the other way, which
+                # is what names Y and X and nothing else here.
+                NestRun("marks", "udword",
+                        [("Unknown1", "dword"), ("Y", "dword"),
+                         ("X", "dword"), ("Unknown2", "dword")]),
+                # one run of `Repeat + 1` cells of `Value`
+                NestRun("cells", BYTE_LENGTH,
+                        [("Repeat", "uword"), ("Value", "ubyte")]),
+            ],
+            []),
+    ] * 2,
 }
 
 
@@ -1860,6 +2022,187 @@ class ChainTable(object):
         return rows
 
 
+class NestTable(object):
+    """One count-only table whose blocks nest several counted runs.
+
+    `<u32 block_count>`, then per block the head fields, each run in file
+    order with whatever length it declares, and last the tail fields. One CSV
+    per level, as BlockTable does: the blocks in the file the caller names,
+    and each run beside it as `<name>.<run>.csv`, joined by the same `Block`
+    column. A block's head and tail fields share the block CSV -- they are one
+    row's worth of facts even though bytes sit between them in the file.
+
+    Run order inside a block is byte order, so each run's CSV is read back in
+    the order it was written: rows must stay grouped and in block order, and
+    the importer says so rather than quietly reshuffling the payload.
+    """
+
+    def __init__(self, grammar, rows, runs, source=None, grammar_source=None):
+        self.grammar = verify_grammar(grammar, source or "grammar")
+        if len(runs) != len(grammar.runs):
+            raise EdfError("%s: %d run(s) of rows for a grammar with %d"
+                           % (source or "table", len(runs), len(grammar.runs)))
+        for run, groups in zip(grammar.runs, runs):
+            if len(groups) != len(rows):
+                raise EdfError("%s: %d block(s) but %d %s list(s)"
+                               % (source or "table", len(rows), len(groups),
+                                  run.name))
+        self.rows = rows
+        self.runs = runs
+        self.source = source
+        self.grammar_source = grammar_source
+
+    @staticmethod
+    def run_path(path, run_name):
+        """Where one run's rows live, given the block CSV's path."""
+        base, ext = os.path.splitext(path)
+        return base + "." + run_name + (ext or ".csv")
+
+    @classmethod
+    def parse(cls, data, offset, grammar, source):
+        """Read `<u32 count>` and its blocks at `offset`.
+
+        Returns the table and the offset just past it.
+        """
+        verify_grammar(grammar, source)
+        if offset + COUNT_HEADER_SIZE > len(data):
+            raise EdfError("%s: %d byte(s) left, too few for a 4-byte block "
+                           "count" % (source, len(data) - offset))
+        count = struct.unpack_from(COUNT_HEADER, data, offset)[0]
+        pos = offset + COUNT_HEADER_SIZE
+        if count > MAX_RECORD_COUNT:
+            raise EdfError("%s: reads as %d blocks, which is not a block "
+                           "count" % (source, count))
+        rows = []
+        runs = [[] for _ in grammar.runs]
+        for i in range(count):
+            row = {}
+            for name, ftype in grammar.head:
+                row[name], pos = read_field(
+                    data, pos, ftype,
+                    "%s block %d field %s" % (source, i, name))
+            previous = None
+            for r, run in enumerate(grammar.runs):
+                where = "%s block %d run %s" % (source, i, run.name)
+                if run.count == SAME_COUNT:
+                    n = previous
+                elif run.count == BYTE_LENGTH:
+                    if pos + BYTE_LENGTH_SIZE > len(data):
+                        raise EdfError("%s: no room for the 4-byte length"
+                                       % where)
+                    length = struct.unpack_from(
+                        BYTE_LENGTH_FORMAT, data, pos)[0]
+                    pos += BYTE_LENGTH_SIZE
+                    size = nest_run_size(run)
+                    if length % size:
+                        raise EdfError(
+                            "%s: %d bytes is not a whole number of %d-byte "
+                            "records -- the length was read at the wrong "
+                            "offset" % (where, length, size))
+                    n = length // size
+                else:
+                    n, pos = read_field(data, pos, run.count,
+                                        "%s record count" % where)
+                if n < 0 or n > MAX_RECORD_COUNT:
+                    raise EdfError("%s: reads as %d records, which is not a "
+                                   "record count" % (where, n))
+                group = []
+                for j in range(n):
+                    item = {}
+                    for name, ftype in run.fields:
+                        item[name], pos = read_field(
+                            data, pos, ftype,
+                            "%s record %d field %s" % (where, j, name))
+                    group.append(item)
+                runs[r].append(group)
+                previous = n
+            for name, ftype in grammar.tail:
+                row[name], pos = read_field(
+                    data, pos, ftype,
+                    "%s block %d field %s" % (source, i, name))
+            rows.append(row)
+        return cls(grammar, rows, runs, source=source,
+                   grammar_source="hand-derived (EDF_TABLE_GRAMMARS)"), pos
+
+    def to_bytes(self):
+        where = self.source or "table"
+        out = bytearray(struct.pack(COUNT_HEADER, len(self.rows)))
+        for i, row in enumerate(self.rows):
+            for name, ftype in self.grammar.head:
+                try:
+                    out += write_field(row[name], ftype)
+                except ValueError as exc:
+                    raise EdfError("%s block %d field %s: %s"
+                                   % (where, i, name, exc))
+            previous = None
+            for r, run in enumerate(self.grammar.runs):
+                group = self.runs[r][i]
+                if run.count == SAME_COUNT:
+                    if len(group) != previous:
+                        raise EdfError(
+                            "%s block %d: %d %s row(s) but %d in the run "
+                            "before it -- the file states one count for both, "
+                            "so they must have the same number of rows"
+                            % (where, i, len(group), run.name, previous))
+                elif run.count == BYTE_LENGTH:
+                    out += struct.pack(BYTE_LENGTH_FORMAT,
+                                       len(group) * nest_run_size(run))
+                else:
+                    try:
+                        out += write_field(len(group), run.count)
+                    except (ValueError, struct.error):
+                        raise EdfError(
+                            "%s block %d: %d %s row(s) is more than this "
+                            "file's %s count can hold"
+                            % (where, i, len(group), run.name, run.count))
+                for j, item in enumerate(group):
+                    for name, ftype in run.fields:
+                        try:
+                            out += write_field(item[name], ftype)
+                        except ValueError as exc:
+                            raise EdfError(
+                                "%s block %d run %s record %d field %s: %s"
+                                % (where, i, run.name, j, name, exc))
+                previous = len(group)
+            for name, ftype in self.grammar.tail:
+                try:
+                    out += write_field(row[name], ftype)
+                except ValueError as exc:
+                    raise EdfError("%s block %d field %s: %s"
+                                   % (where, i, name, exc))
+        return bytes(out)
+
+    @classmethod
+    def from_csv(cls, csv_path, grammar):
+        t = cls(grammar, [], [[] for _ in grammar.runs],
+                source=os.path.basename(csv_path),
+                grammar_source=os.path.basename(csv_path))
+        t.import_csv(csv_path)
+        return t
+
+    def export_csv(self, path):
+        names = [n for n, _ in self.grammar.head + self.grammar.tail]
+        _write_csv(path, names,
+                   ([escape_text(str(row[n])) for n in names]
+                    for row in self.rows))
+        for run, groups in zip(self.grammar.runs, self.runs):
+            inames = [n for n, _ in run.fields]
+            _write_csv(self.run_path(path, run.name), [BLOCK_COLUMN] + inames,
+                       ([str(i)] + [escape_text(str(item[n])) for n in inames]
+                        for i, group in enumerate(groups) for item in group))
+
+    def import_csv(self, path):
+        _leads, rows = _read_csv(path, self.grammar.head + self.grammar.tail)
+        runs = []
+        for run in self.grammar.runs:
+            rpath = self.run_path(path, run.name)
+            leads, items = _read_csv(rpath, run.fields, lead=BLOCK_COLUMN)
+            runs.append(_group_items(leads, items, len(rows), path, rpath))
+        self.rows = rows
+        self.runs = runs
+        return rows
+
+
 def parse_var_tables(payload, grammars, source="EDF payload"):
     """Parse a count-only payload into `VarTable`s, consuming every byte.
 
@@ -1877,6 +2220,8 @@ def parse_var_tables(payload, grammars, source="EDF payload"):
             continue
         if isinstance(grammar, PoolGrammar):
             reader = PoolTable
+        elif isinstance(grammar, NestGrammar):
+            reader = NestTable
         elif isinstance(grammar, BlockGrammar):
             reader = BlockTable
         elif isinstance(grammar, ChainGrammar):
@@ -1945,6 +2290,13 @@ def write_grammar_json(grammar, path, table_name="", source=""):
         doc["item"] = grammar.item
         doc["record_bytes"] = pool_record_size(grammar)
         doc.update(_layout_doc(grammar.lead))
+    elif isinstance(grammar, NestGrammar):
+        doc["kind"] = "nest"
+        doc.update(_layout_doc(grammar.head))
+        doc.update(_layout_doc(grammar.tail, "tail_"))
+        doc["runs"] = [
+            dict({"name": run.name, "count_type": run.count},
+                 **_layout_doc(run.fields)) for run in grammar.runs]
     elif isinstance(grammar, BlockGrammar):
         doc["kind"] = "block"
         doc["item_count_type"] = grammar.count
@@ -1958,9 +2310,10 @@ def write_grammar_json(grammar, path, table_name="", source=""):
         f.write("\n")
 
 
-def _read_layout(doc, where, prefix=""):
+def _read_layout(doc, where, prefix="", may_be_empty=False):
     fields = [(fld["name"], fld["type"]) for fld in doc[prefix + "fields"]]
-    _verify_fields(fields, where)
+    if fields or not may_be_empty:
+        _verify_fields(fields, where)
     widths = [field_width(t) for _, t in fields]
     fixed = sum(w for w in widths if w is not None)
     variable = sum(1 for w in widths if w is None)
@@ -2000,7 +2353,14 @@ def read_grammar_json(path):
                            % (where, pool_record_size(grammar),
                               doc["record_bytes"]))
         return grammar, doc
-    if doc.get("kind") == "block":
+    if doc.get("kind") == "nest":
+        grammar = NestGrammar(
+            _read_layout(doc, where),
+            [NestRun(run["name"], run["count_type"],
+                     _read_layout(run, "%s run %s" % (where, run["name"])))
+             for run in doc["runs"]],
+            _read_layout(doc, where, "tail_", may_be_empty=True))
+    elif doc.get("kind") == "block":
         grammar = BlockGrammar(_read_layout(doc, where),
                                doc["item_count_type"],
                                _read_layout(doc, where, "item_"))
@@ -2024,7 +2384,8 @@ def _csv_round_trip(tables, name, tmp, build):
         csv_path = os.path.join(tmp, "%02d.csv" % i)
         layout_path = os.path.join(tmp, "%02d.json" % i)
         table.export_csv(csv_path)
-        if isinstance(table, (VarTable, BlockTable, PoolTable, ChainTable)):
+        if isinstance(table, (VarTable, BlockTable, PoolTable, ChainTable,
+                              NestTable)):
             write_grammar_json(table.grammar, layout_path,
                                table_name="%s#%d" % (name, i),
                                source=table.grammar_source)
