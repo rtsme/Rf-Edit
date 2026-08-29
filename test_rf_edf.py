@@ -21,12 +21,13 @@ from rf_edf import (CHAIN_HEADER, CHAIN_HEADER_SIZE, DAT_HEADER, EDF_MIN_TEXT_SH
                     EDF_STRING_WIDTHS, EDF_TABLE_GRAMMARS, KEY_LENGTH, MAGIC,
                     LPSTR, MAX_WPSTR, POOLSTR, WPSTR, BYTE_LENGTH, SAME_COUNT,
                     BlockGrammar,
-                    BlockTable, ChainGrammar, ChainTable,
-                    EdfError, NestGrammar, NestRun, NestTable, PoolGrammar,
+                    BlockTable, ChainGrammar, ChainTable, CompanionRuns,
+                    EdfError, GroupGrammar, GroupTable,
+                    NestGrammar, NestRun, NestTable, PoolGrammar,
                     PoolTable,
                     VarTable, build_dat_tables, build_table_chain,
                     build_var_tables, chain_layout, chain_record_size,
-                    classify, dat_layout,
+                    classify, companion_reader, companion_sizes, dat_layout,
                     decrypt, encrypt, field_width, grammar_for, parse_dat_tables,
                     parse_table_chain, parse_var_tables, pool_record_size,
                     INFERRED_CHAIN,
@@ -420,10 +421,10 @@ class VariableRecordTests(unittest.TestCase):
         self.assertIsNotNone(grammar_for("NDEventShip.edf"))
         self.assertIsNotNone(grammar_for("Resource.edf"))
         self.assertIsNotNone(grammar_for("Map.edf"))
+        self.assertIsNotNone(grammar_for("NDMap.edf"))
         # Everything else is still an opaque blob, and must stay one until
         # its grammar is derived rather than guessed.
         self.assertIsNone(grammar_for("Item.edf"))
-        self.assertIsNone(grammar_for("NDMap.edf"))
         for name, grammars in EDF_TABLE_GRAMMARS.items():
             for grammar in grammars:
                 verify_grammar(grammar, name)
@@ -1455,6 +1456,203 @@ class NestedRunTests(unittest.TestCase):
         self.assertEqual(self.MAP[1], self.MAP[2])
         self.assertEqual([r.name for r in self.BLOCK.runs],
                          ["records", "links", "areas", "passages"])
+
+
+class GroupedRunTests(unittest.TestCase):
+    """BACKLOG #56: groups whose lengths are in a different file.
+
+    `en-ph/NDMap.edf` states how many groups it holds and nothing else -- the
+    length of each one is in `Map.edf`. The pair under test here is a
+    miniature of that: a companion whose blocks each carry a counted run, and
+    a grouped table with one label per mark plus one for the block itself.
+
+    What these check above all is the direction of the dependency. The
+    companion is read to *parse* a payload; rebuilding one from CSV must never
+    touch it, or an edit to the companion alone would silently move every byte
+    of the file that borrows from it.
+    """
+
+    COMPANION = NestGrammar(
+        [("Id", "dword")],
+        [NestRun("marks", "udword", [("X", "dword")])],
+        [])
+    LABELS = GroupGrammar(CompanionRuns("Atlas.edf", 0, ("marks",), 1),
+                          [("Label", LPSTR)])
+
+    def _atlas(self, marks):
+        """A companion payload: one block per entry, that many marks in it."""
+        out = struct.pack("<I", len(marks))
+        for i, n in enumerate(marks):
+            out += struct.pack("<II", i, n)
+            out += b"".join(struct.pack("<i", 100 + j) for j in range(n))
+        return out
+
+    def _companion(self, marks):
+        tables = parse_var_tables(self._atlas(marks), [self.COMPANION],
+                                  "Atlas.edf")
+        return lambda name: tables
+
+    def _labels(self, groups):
+        out = struct.pack("<I", len(groups))
+        for group in groups:
+            for text in group:
+                out += struct.pack("<I", len(text) + 1) + text + b"\x00"
+        return out
+
+    GROUPS = [[b"Cauldron", b"Abandon Cave", b"Vapor Lake"], [b"Elan", b"Sette"]]
+    MARKS = [2, 1]                       # 1 + marks == 3 and 2
+
+    def test_round_trip(self):
+        payload = self._labels(self.GROUPS)
+        tables = parse_var_tables(payload, [self.LABELS], "NDAtlas.edf",
+                                  companion=self._companion(self.MARKS))
+        self.assertIsInstance(tables[0], GroupTable)
+        self.assertEqual(tables[0].groups, [3, 2])
+        self.assertEqual([r["Label"] for r in tables[0].rows],
+                         ["Cauldron", "Abandon Cave", "Vapor Lake", "Elan",
+                          "Sette"])
+        self.assertEqual(build_var_tables(tables), payload)
+
+    def test_the_csv_carries_the_grouping(self):
+        # The group number is the only place the split survives, so it has to
+        # be in the CSV: the payload does not hold it and the rebuild will not
+        # go looking for it.
+        tables = parse_var_tables(self._labels(self.GROUPS), [self.LABELS],
+                                  "NDAtlas.edf",
+                                  companion=self._companion(self.MARKS))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "labels.csv")
+            tables[0].export_csv(path)
+            with open(path, encoding="ascii") as f:
+                lines = f.read().splitlines()
+        self.assertEqual(lines[0], "Block,Label")
+        self.assertEqual([line.split(",")[0] for line in lines[1:]],
+                         ["0", "0", "0", "1", "1"])
+
+    def test_rebuilding_from_csv_never_reads_the_companion(self):
+        """The point of the shape: an edit to `Map.edf` cannot move a byte.
+
+        The rebuild happens here with no companion in reach at all -- if
+        `from_csv` needed one it could not run, let alone reproduce the bytes.
+        """
+        payload = self._labels(self.GROUPS)
+        tables = parse_var_tables(payload, [self.LABELS], "NDAtlas.edf",
+                                  companion=self._companion(self.MARKS))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "labels.csv")
+            tables[0].export_csv(path)
+            rebuilt = GroupTable.from_csv(path, self.LABELS)
+        self.assertEqual(rebuilt.groups, [3, 2])
+        self.assertEqual(build_var_tables([rebuilt]), payload)
+
+    def test_the_frozen_grammar_carries_the_companion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "labels.json")
+            write_grammar_json(self.LABELS, path, table_name="NDAtlas.edf#0")
+            with open(path, encoding="ascii") as f:
+                doc = json.load(f)
+            self.assertEqual(doc["kind"], "group")
+            self.assertEqual(doc["companion"],
+                             {"file": "Atlas.edf", "table": 0,
+                              "runs": ["marks"], "plus": 0 + 1})
+            grammar, _doc = read_grammar_json(path)
+        self.assertEqual(grammar, self.LABELS)
+
+    def test_refuses_to_parse_without_a_companion(self):
+        # Unreadable on its own is the true statement about such a file, and
+        # saying so beats guessing a split that would rebuild corrupted rows.
+        with self.assertRaises(EdfError):
+            parse_var_tables(self._labels(self.GROUPS), [self.LABELS],
+                             "NDAtlas.edf")
+
+    def test_refuses_a_companion_that_describes_a_different_number_of_groups(self):
+        with self.assertRaises(EdfError):
+            parse_var_tables(self._labels(self.GROUPS), [self.LABELS],
+                             "NDAtlas.edf",
+                             companion=self._companion([2, 1, 4]))
+
+    def test_refuses_a_split_that_does_not_close(self):
+        # A wrong length here does not truncate one record, it moves every
+        # byte after it -- so the walk missing the last byte is the check.
+        with self.assertRaises(EdfError):
+            parse_var_tables(self._labels(self.GROUPS), [self.LABELS],
+                             "NDAtlas.edf", companion=self._companion([1, 1]))
+
+    def test_refuses_a_companion_that_measures_an_empty_group(self):
+        # An empty group leaves no row to carry its number, so the CSV could
+        # not be read back -- it has to fail on the way out, not on the way in.
+        spec = self.LABELS.groups._replace(plus=0)
+        tables = parse_var_tables(self._atlas([2, 0]), [self.COMPANION], "a")
+        with self.assertRaises(EdfError):
+            companion_sizes(spec, tables, "NDAtlas.edf#0")
+
+    def test_refuses_a_companion_run_it_does_not_have(self):
+        tables = parse_var_tables(self._atlas([2, 1]), [self.COMPANION], "a")
+        with self.assertRaises(EdfError):
+            companion_sizes(self.LABELS.groups._replace(runs=("cells",)),
+                            tables, "NDAtlas.edf#0")
+        with self.assertRaises(EdfError):
+            companion_sizes(self.LABELS.groups._replace(table=3),
+                            tables, "NDAtlas.edf#0")
+
+    def test_a_companion_that_is_not_there_says_so(self):
+        read = companion_reader(os.path.join(tempfile.gettempdir(),
+                                             "en-ph", "NDAtlas.edf"))
+        with self.assertRaises(EdfError):
+            read("NoSuchCompanion.edf")
+
+    def test_import_refuses_gapped_or_reordered_groups(self):
+        header = "Block,Label\n"
+        for body in ("0,a\n2,b\n",           # a gap: group 1 vanished
+                     "1,a\n0,b\n",           # out of order
+                     "0,a\n1,b\n0,c\n"):    # ungrouped
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "labels.csv")
+                with open(path, "w", encoding="ascii", newline="") as f:
+                    f.write(header + body)
+                with self.assertRaises(ValueError):
+                    GroupTable.from_csv(path, self.LABELS)
+
+    def test_verify_grammar_refuses_a_grammar_that_cannot_be_measured(self):
+        spec = self.LABELS.groups
+        with self.assertRaises(EdfError):            # no file named
+            verify_grammar(GroupGrammar(spec._replace(file=""),
+                                        [("Label", LPSTR)]))
+        with self.assertRaises(EdfError):            # no run named
+            verify_grammar(GroupGrammar(spec._replace(runs=()),
+                                        [("Label", LPSTR)]))
+        with self.assertRaises(EdfError):            # not a table index
+            verify_grammar(GroupGrammar(spec._replace(table=-1),
+                                        [("Label", LPSTR)]))
+        with self.assertRaises(EdfError):            # that column is the join
+            verify_grammar(GroupGrammar(spec, [("Block", "dword")]))
+        with self.assertRaises(EdfError):            # lengths from nowhere
+            verify_grammar(GroupGrammar(("Atlas.edf", 0), [("Label", LPSTR)]))
+
+    def test_ndmap_mirrors_map_table_for_table(self):
+        """Three tables against `Map.edf`'s three, in the same order.
+
+        `NDMap.edf` states none of its own record counts, so the registry
+        entry *is* the reading: if a future edit pointed a table at a
+        different companion table or dropped a run from the measure, the walk
+        would still close on some other file and the round trip would still
+        pass. The mirroring is asserted here instead.
+        """
+        nd = EDF_TABLE_GRAMMARS["ndmap.edf"]
+        self.assertEqual(len(nd), len(EDF_TABLE_GRAMMARS["map.edf"]))
+        self.assertEqual([g.groups.table for g in nd], [0, 1, 2])
+        self.assertEqual({g.groups.file for g in nd}, {"Map.edf"})
+        # a block's names: its own, then one per record, then one per passage
+        self.assertEqual(nd[0].groups.runs, ("records", "passages"))
+        self.assertEqual(nd[0].groups.plus, 1)
+        # a minimap's labels: one per mark. The world grids and the insets are
+        # the same shape read twice, differing only in which companion table
+        # measures them -- exactly as `Map.edf`'s own two are one grammar
+        # written twice.
+        self.assertEqual(nd[1], nd[2]._replace(
+            groups=nd[2].groups._replace(table=1)))
+        self.assertEqual(nd[1].groups.runs, ("marks",))
+        self.assertEqual(nd[1].groups.plus, 0)
 
 
 if __name__ == "__main__":

@@ -922,6 +922,37 @@ def nest_run_size(run):
     return sum(field_width(t) for _, t in run.fields)
 
 
+# A **group** grammar: BACKLOG #56's shape, and the only one in this layer
+# whose lengths are not in its own payload at all. `en-ph/NDMap.edf` is why it
+# exists. The file is `<u32 group_count>` and then every record of every
+# group back to back, with nothing marking where one group ends -- those
+# lengths are in `Map.edf`, whose blocks these groups stand one-for-one
+# against. NDMap is the localized *name* table for Map's records, so being
+# unreadable without it is a property of the format, not of this reader.
+#
+# The split is derived, not guessed. Over Map.edf's 37 map blocks
+# `1 + records + passages` is exactly 599, the number of 64-byte names the
+# region holds and the offset the run was already known to end at; in all 21
+# blocks that have passages the last P names of the group are that block's
+# passage names verbatim and in order, and each group opens with the map's
+# display name (`NeutralB` -> `Bellato HQ`). The two minimap tables agree the
+# same way: 202 labels over the 31 world grids and 43 over the 7 insets, one
+# label per mark, `Cauldron01`'s 7 icons getting `Abandon Cave`,
+# `Genial Spr.`, `Vapor Lake`, ...
+#
+# **The companion is read to parse, and never to rebuild.** The group each row
+# belongs to travels in the CSV's `Block` column, exactly as a nested run's
+# rows do, so `from_csv` needs nothing but its own CSV and an edit to `Map.edf`
+# alone cannot move a byte of a rebuilt `NDMap.edf`. What such an edit *can*
+# do is leave the `Block` column describing a grouping the client no longer
+# uses -- a content mismatch between two files, which no byte layer can see.
+#
+# `CompanionRuns` says where a group length comes from: `plus`, plus the
+# lengths of the named runs of block i of table `table` of file `file`.
+CompanionRuns = collections.namedtuple("CompanionRuns", "file table runs plus")
+GroupGrammar = collections.namedtuple("GroupGrammar", "groups fields")
+
+
 def _verify_fields(grammar, source):
     if not grammar:
         raise EdfError("%s: a grammar needs at least one field" % source)
@@ -969,6 +1000,28 @@ def verify_grammar(grammar, source="grammar"):
             raise EdfError("%s: the pooled string may not be called %r -- "
                            "that column carries the record number"
                            % (source, BLOCK_COLUMN))
+        return grammar
+    if isinstance(grammar, GroupGrammar):
+        spec = grammar.groups
+        if not isinstance(spec, CompanionRuns):
+            raise EdfError("%s: a group grammar takes its lengths from a "
+                           "CompanionRuns, not %r" % (source, spec))
+        if not spec.file:
+            raise EdfError("%s: a group grammar must name the file its group "
+                           "lengths come from" % source)
+        if spec.table < 0:
+            raise EdfError("%s: %r is not a table index in %s"
+                           % (source, spec.table, spec.file))
+        if not spec.runs:
+            raise EdfError("%s: a group grammar must name at least one run of "
+                           "%s to measure a group by" % (source, spec.file))
+        if spec.plus < 0:
+            raise EdfError("%s: a group cannot be %d record(s) shorter than "
+                           "the runs measuring it" % (source, spec.plus))
+        _verify_fields(grammar.fields, "%s record" % source)
+        if any(n == BLOCK_COLUMN for n, _ in grammar.fields):
+            raise EdfError("%s: a field may not be called %r -- that column "
+                           "carries the group number" % (source, BLOCK_COLUMN))
         return grammar
     if isinstance(grammar, NestGrammar):
         _verify_fields(grammar.head, "%s block header" % source)
@@ -1399,6 +1452,25 @@ EDF_TABLE_GRAMMARS = {
             ],
             []),
     ] * 2,
+    # BACKLOG #56. `Map.edf`'s names, localized -- three tables that mirror
+    # `Map.edf`'s three one for one, and the only file in this layer that
+    # states none of its own record counts. See the GroupGrammar note above
+    # for the agreements that fix the split, and
+    # docs/knowledge/edf-payload-tables.md for the full reading.
+    #
+    # A block's names are its display name, then one per record of the map --
+    # `dpgoto_bellato_HQ` -> `Bellato HQ`, with `0` where a record has no
+    # label -- then one per passage, verbatim. The two minimap tables are one
+    # label per mark, in mark order.
+    "ndmap.edf": [
+        GroupGrammar(CompanionRuns("Map.edf", 0, ("records", "passages"), 1),
+                     [("Name", "zstr[64]")]),
+    ] + [
+        GroupGrammar(CompanionRuns("Map.edf", 1, ("marks",), 0),
+                     [("Label", LPSTR)]),
+        GroupGrammar(CompanionRuns("Map.edf", 2, ("marks",), 0),
+                     [("Label", LPSTR)]),
+    ],
 }
 
 
@@ -2203,12 +2275,188 @@ class NestTable(object):
         return rows
 
 
-def parse_var_tables(payload, grammars, source="EDF payload"):
+class GroupTable(object):
+    """One count-only table whose groups are as long as another file says.
+
+    `<u32 group_count>` and then every record of every group back to back,
+    with nothing between them. One CSV, joined to the companion by the same
+    `Block` column a nested run uses: row order is byte order, so the rows
+    must stay grouped and in group order, and the importer says so rather
+    than quietly reshuffling the payload.
+
+    The count in front is the number of *groups*, not of records, and it is
+    the only length this file states. `to_bytes` takes it from the rows, so
+    the companion is read to parse the payload and never to rebuild it.
+    """
+
+    def __init__(self, grammar, rows, groups, source=None, grammar_source=None):
+        self.grammar = verify_grammar(grammar, source or "grammar")
+        if sum(groups) != len(rows):
+            raise EdfError("%s: %d group(s) covering %d record(s), but there "
+                           "are %d rows" % (source or "table", len(groups),
+                                            sum(groups), len(rows)))
+        if any(n < 1 for n in groups):
+            raise EdfError("%s: an empty group has no row to carry its number "
+                           "in the CSV, so it could not be read back"
+                           % (source or "table"))
+        self.rows = rows
+        self.groups = groups
+        self.source = source
+        self.grammar_source = grammar_source
+
+    @classmethod
+    def parse(cls, data, offset, grammar, source, sizes):
+        """Read `<u32 group count>` and `sizes` groups of records at `offset`.
+
+        `sizes` comes from the companion file the grammar names -- see
+        `companion_sizes`. Returns the table and the offset just past it.
+        """
+        verify_grammar(grammar, source)
+        if offset + COUNT_HEADER_SIZE > len(data):
+            raise EdfError("%s: %d byte(s) left, too few for a 4-byte group "
+                           "count" % (source, len(data) - offset))
+        count = struct.unpack_from(COUNT_HEADER, data, offset)[0]
+        pos = offset + COUNT_HEADER_SIZE
+        if count != len(sizes):
+            raise EdfError(
+                "%s: this file states %d group(s) and %s describes %d -- the "
+                "two do not line up, and nothing else says where a group ends"
+                % (source, count, grammar.groups.file, len(sizes)))
+        rows = []
+        for i, size in enumerate(sizes):
+            for j in range(size):
+                row = {}
+                for name, ftype in grammar.fields:
+                    row[name], pos = read_field(
+                        data, pos, ftype,
+                        "%s group %d record %d field %s" % (source, i, j, name))
+                rows.append(row)
+        return cls(grammar, rows, list(sizes), source=source,
+                   grammar_source="hand-derived (EDF_TABLE_GRAMMARS)"), pos
+
+    def to_bytes(self):
+        where = self.source or "table"
+        out = bytearray(struct.pack(COUNT_HEADER, len(self.groups)))
+        for i, row in enumerate(self.rows):
+            for name, ftype in self.grammar.fields:
+                try:
+                    out += write_field(row[name], ftype)
+                except ValueError as exc:
+                    raise EdfError("%s record %d field %s: %s"
+                                   % (where, i, name, exc))
+        return bytes(out)
+
+    @classmethod
+    def from_csv(cls, csv_path, grammar):
+        t = cls(grammar, [], [], source=os.path.basename(csv_path),
+                grammar_source=os.path.basename(csv_path))
+        t.import_csv(csv_path)
+        return t
+
+    def export_csv(self, path):
+        names = [n for n, _ in self.grammar.fields]
+        blocks = [i for i, n in enumerate(self.groups) for _ in range(n)]
+        _write_csv(path, [BLOCK_COLUMN] + names,
+                   ([str(b)] + [escape_text(str(row[n])) for n in names]
+                    for b, row in zip(blocks, self.rows)))
+
+    def import_csv(self, path):
+        leads, rows = _read_csv(path, self.grammar.fields, lead=BLOCK_COLUMN)
+        where = os.path.basename(path)
+        groups = []
+        for i, block in enumerate(leads):
+            if groups and block == len(groups) - 1:
+                groups[-1] += 1
+            elif block == len(groups):
+                groups.append(1)
+            else:
+                raise ValueError(
+                    "%s line %d: group %d after group %d -- the groups are "
+                    "numbered from 0 upwards with no gaps, and their rows are "
+                    "written back in the order they appear, so they must stay "
+                    "grouped and in group order"
+                    % (where, i + 2, block, len(groups) - 1))
+        self.rows = rows
+        self.groups = groups
+        return rows
+
+
+def companion_sizes(spec, tables, source):
+    """The group lengths `spec` names, read out of a parsed companion file."""
+    if not 0 <= spec.table < len(tables):
+        raise EdfError("%s: %s has %d table(s), so there is no table %d to "
+                       "take group lengths from"
+                       % (source, spec.file, len(tables), spec.table))
+    table = tables[spec.table]
+    if not isinstance(table, NestTable):
+        raise EdfError("%s: %s table %d has no nested runs, so it cannot say "
+                       "how long a group is" % (source, spec.file, spec.table))
+    names = [run.name for run in table.grammar.runs]
+    picked = []
+    for name in spec.runs:
+        if name not in names:
+            raise EdfError("%s: %s table %d has no run called %r -- it has %s"
+                           % (source, spec.file, spec.table, name,
+                              ", ".join(names)))
+        picked.append(table.runs[names.index(name)])
+    sizes = [spec.plus + sum(len(run[i]) for run in picked)
+             for i in range(len(table.rows))]
+    for i, n in enumerate(sizes):
+        if n < 1:
+            raise EdfError(
+                "%s: %s block %d measures an empty group, which would have no "
+                "row to carry its number in the CSV and could not be read "
+                "back" % (source, spec.file, i))
+    return sizes
+
+
+def companion_reader(path):
+    """Parse the companion files of the `.edf` at `path`, on demand and once.
+
+    A localized table sits one directory below the table it names --
+    `DataTable/en-ph/NDMap.edf` beside `DataTable/Map.edf` -- so a companion
+    is looked for next to the file first and in its parent directory second.
+    It is parsed with no companion of its own, which is all any of them needs
+    and is also what stops a cycle from recursing.
+    """
+    here = os.path.dirname(os.path.abspath(path))
+    cache = {}
+
+    def read(name):
+        key = name.lower()
+        if key not in cache:
+            for folder in (here, os.path.dirname(here)):
+                candidate = os.path.join(folder, name)
+                if os.path.isfile(candidate):
+                    break
+            else:
+                raise EdfError(
+                    "%s says how long %s's groups are, and is neither next to "
+                    "it nor one directory up"
+                    % (name, os.path.basename(path)))
+            grammar = grammar_for(name)
+            if grammar is None:
+                raise EdfError("%s has no grammar of its own, so it cannot "
+                               "say how long another file's groups are" % name)
+            payload, _key = decrypt_file(candidate)
+            cache[key] = parse_var_tables(payload, grammar, name)
+        return cache[key]
+
+    return read
+
+
+def parse_var_tables(payload, grammars, source="EDF payload",
+                     companion=None):
     """Parse a count-only payload into `VarTable`s, consuming every byte.
 
     The closure test is the chain's: the walk has to land exactly on the last
     byte. A grammar that stops early has read a count or a length at the wrong
     offset, and everything after it is wrong too.
+
+    `companion` resolves a file name to that file's parsed tables, for the one
+    grammar kind whose lengths are not in its own payload -- pass
+    `companion_reader(path)`. Only reading needs it; `build_var_tables` never
+    does.
     """
     tables = []
     offset = 0
@@ -2216,6 +2464,20 @@ def parse_var_tables(payload, grammars, source="EDF payload"):
         if grammar is INFERRED_CHAIN:
             table, offset = _parse_inferred_chain(
                 payload, offset, "%s#%d" % (source, i))
+            tables.append(table)
+            continue
+        if isinstance(grammar, GroupGrammar):
+            where = "%s#%d" % (source, i)
+            if companion is None:
+                raise EdfError(
+                    "%s: this table's group lengths are in %s, and no way to "
+                    "read it was given -- parse with "
+                    "companion=companion_reader(path)"
+                    % (where, grammar.groups.file))
+            table, offset = GroupTable.parse(
+                payload, offset, grammar, where,
+                companion_sizes(grammar.groups, companion(grammar.groups.file),
+                                where))
             tables.append(table)
             continue
         if isinstance(grammar, PoolGrammar):
@@ -2290,6 +2552,13 @@ def write_grammar_json(grammar, path, table_name="", source=""):
         doc["item"] = grammar.item
         doc["record_bytes"] = pool_record_size(grammar)
         doc.update(_layout_doc(grammar.lead))
+    elif isinstance(grammar, GroupGrammar):
+        doc["kind"] = "group"
+        doc["companion"] = {"file": grammar.groups.file,
+                            "table": grammar.groups.table,
+                            "runs": list(grammar.groups.runs),
+                            "plus": grammar.groups.plus}
+        doc.update(_layout_doc(grammar.fields))
     elif isinstance(grammar, NestGrammar):
         doc["kind"] = "nest"
         doc.update(_layout_doc(grammar.head))
@@ -2353,7 +2622,13 @@ def read_grammar_json(path):
                            % (where, pool_record_size(grammar),
                               doc["record_bytes"]))
         return grammar, doc
-    if doc.get("kind") == "nest":
+    if doc.get("kind") == "group":
+        companion = doc["companion"]
+        grammar = GroupGrammar(
+            CompanionRuns(companion["file"], companion["table"],
+                          tuple(companion["runs"]), companion["plus"]),
+            _read_layout(doc, where))
+    elif doc.get("kind") == "nest":
         grammar = NestGrammar(
             _read_layout(doc, where),
             [NestRun(run["name"], run["count_type"],
@@ -2385,7 +2660,7 @@ def _csv_round_trip(tables, name, tmp, build):
         layout_path = os.path.join(tmp, "%02d.json" % i)
         table.export_csv(csv_path)
         if isinstance(table, (VarTable, BlockTable, PoolTable, ChainTable,
-                              NestTable)):
+                              NestTable, GroupTable)):
             write_grammar_json(table.grammar, layout_path,
                                table_name="%s#%d" % (name, i),
                                source=table.grammar_source)
@@ -2424,9 +2699,11 @@ def _check_tables(paths):
         grammar = grammar_for(name)
         try:
             if grammar is not None:
-                kind, tables, build = ("grammar",
-                                       parse_var_tables(payload, grammar, name),
-                                       build_var_tables)
+                kind, tables, build = (
+                    "grammar",
+                    parse_var_tables(payload, grammar, name,
+                                     companion=companion_reader(path)),
+                    build_var_tables)
             else:
                 kind, tables, build = ("chain",
                                        parse_table_chain(payload, name),
@@ -2521,7 +2798,9 @@ def main(argv=None):
             grammar = grammar_for(name)
             if grammar is not None:
                 try:
-                    tables = parse_var_tables(payload, grammar, name)
+                    tables = parse_var_tables(
+                        payload, grammar, name,
+                        companion=companion_reader(path))
                 except SchemaError as exc:
                     print("BROKEN %-28s %8d bytes  its grammar does not fit: %s"
                           % (name, len(payload), str(exc).split(": ", 1)[-1]))
