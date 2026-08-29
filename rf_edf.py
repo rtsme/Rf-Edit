@@ -431,7 +431,7 @@ def classify(payload, source="EDF payload"):
 # 278 records matching Store.edf's.
 #
 # Neither of the other 30 payloads closes under this walk, and neither of
-# these two closes under the chain walk or has a grammar, so the three
+# these two closes under the chain walk or has a grammar, so the four
 # readings do not compete for a file. See docs/knowledge/edf-payload-tables.md.
 
 DAT_HEADER = "<3I"
@@ -543,6 +543,198 @@ def build_dat_tables(tables):
     """
     out = bytearray()
     for table in tables:
+        out += table.to_bytes()
+    return bytes(out)
+
+# --------------------------------------------------------------------------
+# the fourth payload: a chain whose tables each carry a 10-byte stamp
+# --------------------------------------------------------------------------
+#
+# BACKLOG #52, eighth session. `Item.edf` is the last file the other three
+# readings reject, and the reason is a wrapper, not a record layout: it *is* a
+# table chain, but every table is preceded by ten bytes the chain walk knows
+# nothing about, so `chain_layout` reads the stamp as a count and a size and
+# stops at offset 0. Hence the old note that the payload "starts `00 f1 c8 30`,
+# a value, not a header" -- it is a header, just not the one being looked for.
+#
+#     <u8 index> <u8 0xf1> <u32 body_length> <u32 own_offset>   10-byte stamp
+#     body_length bytes                                         the body
+#
+# and a table body is the ordinary chain table the other 17 files are made of:
+#
+#     <u32 record_count> <u32 record_size>
+#     record_count * record_size bytes
+#
+# **Two redundant numbers are what make this a derivation rather than a
+# guess.** The stamp states its own offset, which must equal where the walk
+# already is, and a body length, which must equal `8 + count * size` computed
+# from numbers stored four and eight bytes further on. Neither is needed to
+# read the file; both have to agree at every block or the walk is wrong. They
+# agree at all 47, and the walk closes on the last of 15 199 742 bytes.
+#
+# The third agreement is in a different file. `Item.edf`'s first 44 tables
+# hold 80, 7469, 7469, 7469, 7469, 8099, 10642, 1846, ... records, and those
+# are, in order and exactly, the record counts of the 44 name tables of
+# `en-ph/NDItem.edf` -- a file read by a wholly unrelated grammar. Item data
+# and item names, table for table. Nothing in this walk used `NDItem.edf`, so
+# 44 independent agreements are as strong a check as this layer has had.
+#
+# The 47th and last block is not a table: its body is 368 bytes that do not
+# satisfy `8 + count * size`, so the reading does not force them to. A block
+# whose body length matches is read as a chain table; one that does not is
+# kept as a single fixed record, which is the honest description of a footer
+# whose meaning is not derived. It reads as 92 dwords -- two arrays of 46, one
+# entry per data block, whose non-zero entries land on the same handful of
+# tables in both halves. What the two arrays are *for* is not known, and the
+# reading claims nothing about it.
+#
+# The stamp's index byte runs 0..45 for the data tables and is 47 on the
+# footer: 46 is not used by this file. Nothing in the payload derives that, so
+# it is carried per table rather than recomputed, the way a `.dat` table's
+# `header_field_count` is.
+
+STAMP_MAGIC = 0xF1
+STAMP_HEADER = "<BBII"
+STAMP_HEADER_SIZE = struct.calcsize(STAMP_HEADER)
+assert STAMP_HEADER_SIZE == 10
+
+
+def stamp_layout(payload, source="EDF payload"):
+    """Return `[(index, body_length, offset), ...]` for a stamped payload.
+
+    Structure only, like `chain_layout`, and strict for its reason: a stamp
+    that does not state its own offset, or a walk that does not end on the
+    last byte, means the stamps are being read at the wrong places and every
+    body after that point is garbage.
+    """
+    layout = []
+    offset = 0
+    while offset < len(payload):
+        if len(payload) - offset < STAMP_HEADER_SIZE:
+            raise EdfError(
+                "%s: %d byte(s) left after block %d -- too few for another "
+                "%d-byte stamp"
+                % (source, len(payload) - offset, len(layout),
+                   STAMP_HEADER_SIZE))
+        index, magic, body, own = struct.unpack_from(
+            STAMP_HEADER, payload, offset)
+        if magic != STAMP_MAGIC:
+            raise EdfError(
+                "%s block %d at offset %d: second stamp byte is 0x%02x, not "
+                "0x%02x" % (source, len(layout), offset, magic, STAMP_MAGIC))
+        if own != offset:
+            raise EdfError(
+                "%s block %d: its stamp says it starts at %d, but the walk is "
+                "at %d" % (source, len(layout), own, offset))
+        end = offset + STAMP_HEADER_SIZE + body
+        if end > len(payload):
+            raise EdfError(
+                "%s block %d at offset %d: a %d-byte body runs %d byte(s) "
+                "past the end of the payload"
+                % (source, len(layout), offset, body, end - len(payload)))
+        layout.append((index, body, offset))
+        offset = end
+    if not layout:
+        raise EdfError("%s: no blocks" % source)
+    return layout
+
+
+class StampTable(object):
+    """One stamped block: the stamp's index and the table in its body.
+
+    Deliberately thin. The body is an ordinary `rf_dat.Table` and does all the
+    CSV work; this only remembers the two things the body cannot state -- the
+    stamp's index byte, and whether the body carries the 8-byte chain header
+    (a data table) or is a single bare record (the footer).
+    """
+
+    def __init__(self, index, table, headed, source=None):
+        self.index = index
+        self.table = table
+        self.headed = headed
+        self.source = source
+        self.offset = 0
+
+    @property
+    def rows(self):
+        return self.table.rows
+
+    @property
+    def schema(self):
+        return self.table.schema
+
+    @property
+    def schema_source(self):
+        return self.table.schema_source
+
+    @classmethod
+    def parse(cls, payload, index, body, offset, source):
+        data = payload[offset + STAMP_HEADER_SIZE:
+                       offset + STAMP_HEADER_SIZE + body]
+        if body >= CHAIN_HEADER_SIZE:
+            count, rec_size = struct.unpack_from(CHAIN_HEADER, data, 0)
+            if body == CHAIN_HEADER_SIZE + count * rec_size:
+                return cls(index,
+                           _table_from_records(data[CHAIN_HEADER_SIZE:],
+                                               count, rec_size, source),
+                           True, source=source)
+        # Not a chain table. One fixed record, read as numbers: inferring a
+        # schema from a single record invents string columns out of runs of
+        # zero bytes, which is a claim about bytes that are not there -- the
+        # same reason `_table_from_records` refuses to infer from no records.
+        if body % 4:
+            raise EdfError(
+                "%s: a %d-byte body is neither a chain table nor a whole "
+                "number of dwords, so there is no evidence for any layout"
+                % (source, body))
+        schema = [("Val%d" % (i + 1), "dword") for i in range(body // 4)]
+        verify_schema(schema, len(schema), body)
+        row = {}
+        for i, (name, ftype) in enumerate(schema):
+            row[name] = decode(data[i * 4:(i + 1) * 4], ftype)
+        return cls(index,
+                   Table(schema, [row], len(schema), body, source=source,
+                         schema_source="dwords (body is not a chain table)",
+                         strict_field_count=False),
+                   False, source=source)
+
+    def to_bytes(self):
+        body = self.table.to_bytes()[HEADER_SIZE:]
+        if self.headed:
+            body = struct.pack(CHAIN_HEADER, len(self.table.rows),
+                               self.table.rec_size) + body
+        return (struct.pack(STAMP_HEADER, self.index, STAMP_MAGIC,
+                            len(body), self.offset) + body)
+
+    def export_csv(self, path):
+        self.table.export_csv(path)
+
+    @classmethod
+    def from_csv(cls, csv_path, schema, index, headed, field_count=None):
+        return cls(index,
+                   Table.from_csv(csv_path, schema, field_count=field_count),
+                   headed, source=os.path.basename(csv_path))
+
+
+def parse_stamped_tables(payload, source="EDF payload"):
+    """Parse a stamped payload into `StampTable`s, consuming every byte."""
+    tables = []
+    for index, body, offset in stamp_layout(payload, source):
+        tables.append(StampTable.parse(
+            payload, index, body, offset, "%s#%d" % (source, len(tables))))
+    return tables
+
+
+def build_stamped_tables(tables):
+    """Rebuild a stamped payload from `StampTable`s.
+
+    Each stamp's own-offset is written from where the block actually lands, not
+    from what was read: it is derived, so a rebuild is self-consistent even if
+    a table above it changed size.
+    """
+    out = bytearray()
+    for table in tables:
+        table.offset = len(out)
         out += table.to_bytes()
     return bytes(out)
 
@@ -2644,10 +2836,40 @@ def read_grammar_json(path):
     verify_grammar(grammar, where)
     return grammar, doc
 
+def write_stamp_json(table, path, table_name="", source=""):
+    """Freeze a stamped block's schema plus the two facts its body cannot state.
+
+    The schema half is `rf_dat.write_schema_json` verbatim -- a stamped body is
+    an ordinary chain table and deserves the ordinary schema doc, redundant
+    totals and all. The stamp's index byte and whether the body is headed are
+    then added to that same doc rather than to `rf_dat`'s writer, which knows
+    nothing about this container and should keep knowing nothing.
+    """
+    write_schema_json(table.schema, path, dat_name=table_name, source=source,
+                      header_field_count=table.table.field_count)
+    with open(path, "r", encoding="ascii") as f:
+        doc = json.load(f)
+    doc["stamp_index"] = table.index
+    doc["stamp_headed"] = table.headed
+    with open(path, "w", encoding="ascii", newline="\n") as f:
+        json.dump(doc, f, indent=1)
+        f.write("\n")
+
+
+def read_stamp_json(path):
+    """`(schema, doc)` for a stamped block, refusing a doc missing its stamp."""
+    schema, doc = read_schema_json(path)
+    for key in ("stamp_index", "stamp_headed"):
+        if key not in doc:
+            raise EdfError("%s: no %s -- this is a schema for a plain table, "
+                           "not for a stamped block" % (path, key))
+    return schema, doc
+
+
 def _csv_round_trip(tables, name, tmp, build):
     """Write every table out as CSV + frozen layout, read it back, rebuild.
 
-    All three payload models come through here, and each one freezes the
+    All four payload models come through here, and each one freezes the
     layout its own reader needs -- a schema for a chain or .dat table, a
     grammar for a variable-record one. `build` is the matching payload
     builder, passed in rather than sniffed: a chain table and a .dat table are
@@ -2659,7 +2881,15 @@ def _csv_round_trip(tables, name, tmp, build):
         csv_path = os.path.join(tmp, "%02d.csv" % i)
         layout_path = os.path.join(tmp, "%02d.json" % i)
         table.export_csv(csv_path)
-        if isinstance(table, (VarTable, BlockTable, PoolTable, ChainTable,
+        if isinstance(table, StampTable):
+            write_stamp_json(table, layout_path,
+                             table_name="%s#%d" % (name, i),
+                             source=table.schema_source)
+            schema, doc = read_stamp_json(layout_path)
+            rebuilt.append(StampTable.from_csv(
+                csv_path, schema, doc["stamp_index"], doc["stamp_headed"],
+                field_count=doc.get("header_field_count")))
+        elif isinstance(table, (VarTable, BlockTable, PoolTable, ChainTable,
                               NestTable, GroupTable)):
             write_grammar_json(table.grammar, layout_path,
                                table_name="%s#%d" % (name, i),
@@ -2683,10 +2913,10 @@ def _check_tables(paths):
     The CSV hop is the point. Parsing a payload proves only that the bytes
     fit; writing the rows out as text, reading them back through the frozen
     layout, and reproducing the payload to the byte is what makes a file safe
-    to *edit*. A file matching none of the three readings is reported as
+    to *edit*. A file matching none of the four readings is reported as
     unhandled, never silently accepted.
     """
-    counts = {"chain": 0, "grammar": 0, "dat": 0}
+    counts = {"chain": 0, "grammar": 0, "dat": 0, "stamped": 0}
     failed = skipped = 0
     for path in paths:
         name = os.path.basename(path)
@@ -2723,13 +2953,18 @@ def _check_tables(paths):
                                        parse_dat_tables(payload, name),
                                        build_dat_tables)
             except SchemaError:
-                # Reported against the chain reading: it is the one that gets
-                # furthest into these payloads, so its message says the most
-                # about where the walk broke.
-                print("SKIP   %-28s not a table chain: %s"
-                      % (name, chain_why.split(": ", 1)[-1]))
-                skipped += 1
-                continue
+                try:
+                    kind, tables, build = ("stamped",
+                                           parse_stamped_tables(payload, name),
+                                           build_stamped_tables)
+                except (SchemaError, EdfError):
+                    # Reported against the chain reading: it is the one that
+                    # gets furthest into these payloads, so its message says
+                    # the most about where the walk broke.
+                    print("SKIP   %-28s not a table chain: %s"
+                          % (name, chain_why.split(": ", 1)[-1]))
+                    skipped += 1
+                    continue
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 blob = _csv_round_trip(tables, name, tmp, build)
@@ -2750,9 +2985,9 @@ def _check_tables(paths):
                   % (name, len(blob), len(payload), where))
             failed += 1
     print("\n%d payload(s) round-trip byte-exact through CSV (%d chain, "
-          "%d grammar, %d dat), %d failed, %d unhandled"
+          "%d grammar, %d dat, %d stamped), %d failed, %d unhandled"
           % (sum(counts.values()), counts["chain"], counts["grammar"],
-             counts["dat"], failed, skipped))
+             counts["dat"], counts["stamped"], failed, skipped))
     return 1 if failed else 0
 
 
@@ -2764,7 +2999,7 @@ def main(argv=None):
     parser.add_argument("--check", action="store_true",
                         help="decode then re-encode each file and diff against the original")
     parser.add_argument("--classify", action="store_true",
-                        help="report which of the three payload readings each file takes, and why none fits if so")
+                        help="report which of the four payload readings each file takes, and why none fits if so")
     parser.add_argument("--check-tables", action="store_true",
                         help="round-trip each readable payload through CSV and diff the bytes")
     parser.add_argument("--encode", action="store_true",
@@ -2787,7 +3022,7 @@ def main(argv=None):
         return 0
 
     if args.classify:
-        chains = grammars = dats = 0
+        chains = grammars = dats = stamped = 0
         for path in args.file:
             name = os.path.basename(path)
             try:
@@ -2823,8 +3058,18 @@ def main(argv=None):
             try:
                 tables = parse_dat_tables(payload, name)
             except SchemaError:
-                print("OTHER  %-28s %8d bytes  %s"
-                      % (name, len(payload), why.split(": ", 1)[-1]))
+                try:
+                    blocks = parse_stamped_tables(payload, name)
+                except (SchemaError, EdfError):
+                    print("OTHER  %-28s %8d bytes  %s"
+                          % (name, len(payload), why.split(": ", 1)[-1]))
+                    continue
+                stamped += 1
+                print("STAMPD %-28s %8d bytes  %2d block(s)  %s"
+                      % (name, len(payload), len(blocks),
+                         ", ".join("%dx%d" % (len(b.rows), b.table.rec_size)
+                                   for b in blocks[:6])
+                         + (", ..." if len(blocks) > 6 else "")))
                 continue
             dats += 1
             print("DAT    %-28s %8d bytes  %2d table(s)  %s"
@@ -2833,8 +3078,8 @@ def main(argv=None):
                                % (len(t.rows), t.rec_size, t.field_count)
                                for t in tables[:4])))
         print("\n%d/%d payload(s) are table chains, %d have a hand-derived "
-              "grammar, %d are plain .dat containers"
-              % (chains, len(args.file), grammars, dats))
+              "grammar, %d are plain .dat containers, %d stamped chain(s)"
+              % (chains, len(args.file), grammars, dats, stamped))
         return 0
 
     if args.check_tables:

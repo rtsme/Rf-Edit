@@ -16,7 +16,7 @@ import struct
 import tempfile
 import unittest
 
-from rf_dat import SchemaError, Table, infer_schema
+from rf_dat import SchemaError, Table, infer_schema, write_schema_json
 from rf_edf import (CHAIN_HEADER, CHAIN_HEADER_SIZE, DAT_HEADER, EDF_MIN_TEXT_SHARE,
                     EDF_STRING_WIDTHS, EDF_TABLE_GRAMMARS, KEY_LENGTH, MAGIC,
                     LPSTR, MAX_WPSTR, POOLSTR, WPSTR, BYTE_LENGTH, SAME_COUNT,
@@ -32,7 +32,10 @@ from rf_edf import (CHAIN_HEADER, CHAIN_HEADER_SIZE, DAT_HEADER, EDF_MIN_TEXT_SH
                     parse_table_chain, parse_var_tables, pool_record_size,
                     INFERRED_CHAIN,
                     read_field, read_grammar_json, verify_grammar,
-                    write_field, write_grammar_json)
+                    write_field, write_grammar_json,
+                    STAMP_HEADER, STAMP_MAGIC, StampTable, build_stamped_tables,
+                    parse_stamped_tables, read_stamp_json, stamp_layout,
+                    write_stamp_json)
 
 
 class ContainerTests(unittest.TestCase):
@@ -1653,6 +1656,155 @@ class GroupedRunTests(unittest.TestCase):
             groups=nd[2].groups._replace(table=1)))
         self.assertEqual(nd[1].groups.runs, ("marks",))
         self.assertEqual(nd[1].groups.plus, 0)
+
+
+
+class StampedPayloadTests(unittest.TestCase):
+    """`Item.edf`: a table chain whose tables each carry a 10-byte stamp.
+
+    The stamp states its own offset and its body length, both of which are
+    redundant with where the walk already is and with the chain header four
+    bytes further on. The refusals below are the point of that redundancy: a
+    stamp read at the wrong place has to stop the walk, not half-read it.
+    """
+
+    SCHEMA = [("Index", "dword"), ("Code", "string[16]")]
+    REC_SIZE = 20
+
+    def _table(self, index, rows, offset):
+        body = struct.pack(CHAIN_HEADER, len(rows), self.REC_SIZE)
+        for i, code in rows:
+            body += struct.pack("<i", i) + code.ljust(16, b"\x00")
+        return (struct.pack(STAMP_HEADER, index, STAMP_MAGIC, len(body), offset)
+                + body)
+
+    def _footer(self, index, offset, values):
+        body = struct.pack("<%dI" % len(values), *values)
+        return (struct.pack(STAMP_HEADER, index, STAMP_MAGIC, len(body), offset)
+                + body)
+
+    def test_stamped_round_trip(self):
+        payload = self._table(0, [(0, b"ACM"), (1, b"ACF")], 0)
+        self.assertEqual(stamp_layout(payload), [(0, 48, 0)])
+        parsed = parse_stamped_tables(payload, "Item.edf")
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0].index, 0)
+        self.assertTrue(parsed[0].headed)
+        self.assertEqual(parsed[0].schema, self.SCHEMA)
+        self.assertEqual(parsed[0].rows[1]["Code"], "ACF")
+        self.assertEqual(build_stamped_tables(parsed), payload)
+
+    def test_several_blocks_end_to_end(self):
+        a = self._table(0, [(0, b"ACM"), (1, b"ACF")], 0)
+        b = self._table(1, [(2, b"DEM")], len(a))
+        payload = a + b
+        self.assertEqual(stamp_layout(payload), [(0, 48, 0), (1, 28, len(a))])
+        self.assertEqual(build_stamped_tables(parse_stamped_tables(payload)),
+                         payload)
+
+    def test_index_byte_is_carried_not_recomputed(self):
+        """`Item.edf` numbers its blocks 0..45 and then 47, skipping 46.
+
+        Nothing in the payload derives that, so a rebuild that renumbered the
+        blocks from their position would write a file the client reads
+        differently. The stamp's index has to survive the round trip.
+        """
+        a = self._table(0, [(0, b"ACM")], 0)
+        b = self._table(47, [(1, b"ACF")], len(a))
+        parsed = parse_stamped_tables(a + b)
+        self.assertEqual([t.index for t in parsed], [0, 47])
+        self.assertEqual(build_stamped_tables(parsed), a + b)
+
+    def test_a_body_that_is_not_a_chain_table_is_kept_as_dwords(self):
+        """The last block's 368 bytes do not satisfy `8 + count * size`.
+
+        Inferring a schema from a single record invents string columns out of
+        runs of zero bytes, so the footer is read as numbers instead -- the
+        same refusal `_table_from_records` makes for an empty table.
+        """
+        values = [0, 406, 594, 0, 0, 176]
+        payload = self._footer(47, 0, values)
+        parsed = parse_stamped_tables(payload, "Item.edf")
+        self.assertEqual(len(parsed), 1)
+        self.assertFalse(parsed[0].headed)
+        self.assertEqual([t for _, t in parsed[0].schema],
+                         ["dword"] * len(values))
+        self.assertEqual([parsed[0].rows[0]["Val%d" % (i + 1)]
+                          for i in range(len(values))], values)
+        self.assertEqual(build_stamped_tables(parsed), payload)
+
+    def test_refuses_a_stamp_that_misstates_its_own_offset(self):
+        a = self._table(0, [(0, b"ACM")], 0)
+        b = self._table(1, [(1, b"ACF")], len(a) + 4)   # wrong own-offset
+        with self.assertRaises(EdfError):
+            stamp_layout(a + b)
+
+    def test_refuses_a_wrong_magic_byte(self):
+        payload = bytearray(self._table(0, [(0, b"ACM")], 0))
+        payload[1] = 0xF2
+        with self.assertRaises(EdfError):
+            stamp_layout(bytes(payload))
+
+    def test_refuses_a_body_running_past_the_end(self):
+        payload = self._table(0, [(0, b"ACM"), (1, b"ACF")], 0)
+        with self.assertRaises(EdfError):
+            stamp_layout(payload[:-1])
+
+    def test_refuses_a_trailing_stub_too_short_for_a_stamp(self):
+        payload = self._table(0, [(0, b"ACM")], 0)
+        with self.assertRaises(EdfError):
+            stamp_layout(payload + bytes(6))
+
+    def test_refuses_an_unheaded_body_that_is_not_whole_dwords(self):
+        body = b"\x01\x02\x03"
+        payload = (struct.pack(STAMP_HEADER, 0, STAMP_MAGIC, len(body), 0)
+                   + body)
+        with self.assertRaises(EdfError):
+            parse_stamped_tables(payload, "Item.edf")
+
+    def test_a_plain_chain_is_not_read_as_stamped(self):
+        """The four readings must not compete for a file.
+
+        A chain payload's first eight bytes are a count and a record size, and
+        reading them as a stamp puts the walk somewhere arbitrary -- so this
+        has to raise rather than return a plausible layout.
+        """
+        chain = (struct.pack(CHAIN_HEADER, 1, self.REC_SIZE)
+                 + struct.pack("<i", 0) + b"ACM".ljust(16, b"\x00"))
+        with self.assertRaises(EdfError):
+            stamp_layout(chain)
+
+    def test_stamp_json_round_trips_the_stamp(self):
+        parsed = parse_stamped_tables(
+            self._table(47, [(0, b"ACM")], 0), "Item.edf")
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = os.path.join(tmp, "00.csv")
+            layout = os.path.join(tmp, "00.json")
+            parsed[0].export_csv(csv_path)
+            write_stamp_json(parsed[0], layout, table_name="Item.edf#0",
+                             source="inferred from records")
+            schema, doc = read_stamp_json(layout)
+            self.assertEqual(doc["stamp_index"], 47)
+            self.assertTrue(doc["stamp_headed"])
+            back = StampTable.from_csv(csv_path, schema, doc["stamp_index"],
+                                       doc["stamp_headed"],
+                                       field_count=doc["header_field_count"])
+            self.assertEqual(build_stamped_tables([back]),
+                             build_stamped_tables(parsed))
+
+    def test_a_schema_json_without_a_stamp_is_refused(self):
+        """A plain schema doc must not be usable as a stamped block's layout.
+
+        It would rebuild every block with index 0 and a chain header, which is
+        a different file that still looks like a valid one.
+        """
+        parsed = parse_stamped_tables(
+            self._table(0, [(0, b"ACM")], 0), "Item.edf")
+        with tempfile.TemporaryDirectory() as tmp:
+            layout = os.path.join(tmp, "00.json")
+            write_schema_json(parsed[0].schema, layout, dat_name="Item.edf#0")
+            with self.assertRaises(EdfError):
+                read_stamp_json(layout)
 
 
 if __name__ == "__main__":
