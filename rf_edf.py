@@ -716,12 +716,103 @@ class StampTable(object):
                    headed, source=os.path.basename(csv_path))
 
 
+class StampedDirectoryError(EdfError):
+    """A stamped payload whose footer and its target block disagree.
+
+    Distinct from a plain `EdfError` so a caller can tell "this is not a
+    stamped payload at all" from "this is one, and its two halves contradict
+    each other" -- a skip and a failure, which are not the same report.
+    """
+
+
+def check_stamped_directory(tables, source="EDF payload"):
+    """Refuse a stamped payload whose footer disagrees with the block it indexes.
+
+    BACKLOG #60 derived two redundancies in `Item.edf`'s footer and #61 checks
+    them, for the reason the rest of this layer checks its redundant numbers:
+    an edit that adds a row to the indexed block without fixing the directory
+    rebuilds *byte-exactly* and hands the client a file whose directory points
+    at the wrong rows. The round trip cannot see that. Nothing else would.
+
+    The footer is two parallel arrays of one entry per data block -- a first
+    row and a row count -- naming slices of one other block. The checks are:
+
+      * the non-empty ranges tile that block exactly: contiguous from row 0,
+        no gap and no overlap;
+      * every row of it carries, in its second field, the index of the block
+        whose range contains it. Its first field is the row's own number.
+
+    Deliberately shape-guarded rather than named: a payload that is stamped
+    but carries no footer of this shape is left alone, because there is only
+    one file in this format and a check that fired on a different one would be
+    a claim about bytes nobody has read. What is *not* softened is the case
+    where the shape does match and the contents disagree.
+
+    This is a read check. The directory is never recomputed on write: a
+    rebuild that silently rewrote it would hide the bad edit instead of
+    catching it, which is the opposite of the point.
+    """
+    footers = [t for t in tables if not t.headed]
+    headed = [t for t in tables if t.headed]
+    if len(footers) != 1 or not headed:
+        return
+    footer = footers[0]
+    if len(footer.rows) != 1:
+        return
+    values = [footer.rows[0][name] for name, _ in footer.schema]
+    if len(values) != 2 * len(headed):
+        return
+    half = len(headed)
+    first, length = values[:half], values[half:]
+    if any(n < 0 for n in first) or any(n < 0 for n in length):
+        raise StampedDirectoryError(
+            "%s: its directory has a negative row number or row count" % source)
+    owners = [i for i in range(half) if length[i]]
+    if not owners:
+        return
+
+    # The ranges have to tile, contiguous from row 0.
+    at = 0
+    for i in sorted(owners, key=lambda i: first[i]):
+        if first[i] != at:
+            raise StampedDirectoryError(
+                "%s: block %d's slice starts at row %d, but the slice before "
+                "it ends at row %d -- the directory's ranges must be "
+                "contiguous from row 0 with no gap and no overlap"
+                % (source, i, first[i], at))
+        at += length[i]
+
+    # The block they tile is the one with exactly that many rows. If that does
+    # not pick out a single block there is nothing to compare against, and
+    # guessing which one was meant would be the sort of claim this refuses.
+    targets = [i for i, t in enumerate(headed) if len(t.rows) == at]
+    if len(targets) != 1:
+        return
+    target = headed[targets[0]]
+    if len(target.schema) < 2:
+        return
+    owner_field = target.schema[1][0]
+
+    owner_of = {}
+    for i in owners:
+        for row in range(first[i], first[i] + length[i]):
+            owner_of[row] = i
+    for row, values in enumerate(target.rows):
+        if values[owner_field] != owner_of[row]:
+            raise StampedDirectoryError(
+                "%s: block %d row %d says it belongs to block %s, but the "
+                "directory puts that row in block %d's slice"
+                % (source, targets[0], row, values[owner_field],
+                   owner_of[row]))
+
+
 def parse_stamped_tables(payload, source="EDF payload"):
     """Parse a stamped payload into `StampTable`s, consuming every byte."""
     tables = []
     for index, body, offset in stamp_layout(payload, source):
         tables.append(StampTable.parse(
             payload, index, body, offset, "%s#%d" % (source, len(tables))))
+    check_stamped_directory(tables, source)
     return tables
 
 
@@ -2957,6 +3048,13 @@ def _check_tables(paths):
                     kind, tables, build = ("stamped",
                                            parse_stamped_tables(payload, name),
                                            build_stamped_tables)
+                except StampedDirectoryError as exc:
+                    # It *is* a stamped payload; its two halves contradict
+                    # each other. That is a failure, not an unread file.
+                    print("FAIL   %-28s %s"
+                          % (name, str(exc).split(": ", 1)[-1]))
+                    failed += 1
+                    continue
                 except (SchemaError, EdfError):
                     # Reported against the chain reading: it is the one that
                     # gets furthest into these payloads, so its message says
@@ -3060,6 +3158,11 @@ def main(argv=None):
             except SchemaError:
                 try:
                     blocks = parse_stamped_tables(payload, name)
+                except StampedDirectoryError as exc:
+                    print("BROKEN %-28s %8d bytes  its directory does not fit: "
+                          "%s" % (name, len(payload),
+                                  str(exc).split(": ", 1)[-1]))
+                    continue
                 except (SchemaError, EdfError):
                     print("OTHER  %-28s %8d bytes  %s"
                           % (name, len(payload), why.split(": ", 1)[-1]))

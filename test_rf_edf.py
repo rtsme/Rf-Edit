@@ -34,6 +34,7 @@ from rf_edf import (CHAIN_HEADER, CHAIN_HEADER_SIZE, DAT_HEADER, EDF_MIN_TEXT_SH
                     read_field, read_grammar_json, verify_grammar,
                     write_field, write_grammar_json,
                     STAMP_HEADER, STAMP_MAGIC, StampTable, build_stamped_tables,
+                    StampedDirectoryError, check_stamped_directory,
                     parse_stamped_tables, read_stamp_json, stamp_layout,
                     write_stamp_json)
 
@@ -1805,6 +1806,114 @@ class StampedPayloadTests(unittest.TestCase):
             write_schema_json(parsed[0].schema, layout, dat_name="Item.edf#0")
             with self.assertRaises(EdfError):
                 read_stamp_json(layout)
+
+
+
+class StampedDirectoryTests(unittest.TestCase):
+    """`Item.edf`'s footer indexes one of its own blocks, and must agree with it.
+
+    BACKLOG #60 derived the two redundancies; #61 checks them. The reason they
+    are worth checking is that breaking them is *invisible* to the round trip:
+    a payload whose directory points at the wrong rows still rebuilds
+    byte-exactly, so nothing else in this file would catch it.
+
+    The synthetic payload below is `Item.edf`'s shape in miniature: three data
+    blocks, of which two own slices of the third, plus the footer.
+    """
+
+    OWNER_SIZE = 8       # <dword Index><dword Owner>
+    DATA_SIZE = 4        # <dword Val1>
+
+    def _block(self, index, offset, records, rec_size):
+        body = struct.pack(CHAIN_HEADER, len(records), rec_size) + b"".join(records)
+        return (struct.pack(STAMP_HEADER, index, STAMP_MAGIC, len(body), offset)
+                + body)
+
+    def _footer(self, index, offset, first, length):
+        body = struct.pack("<%dI" % (len(first) + len(length)),
+                           *(list(first) + list(length)))
+        return (struct.pack(STAMP_HEADER, index, STAMP_MAGIC, len(body), offset)
+                + body)
+
+    def _payload(self, owners=(0, 0, 1, 1, 1), first=(0, 2, 0),
+                 length=(2, 3, 0)):
+        """Blocks 0 and 1 own slices of block 2; block 2's rows name an owner."""
+        out = b""
+        for index in (0, 1):
+            recs = [struct.pack("<i", index)] * 2
+            out += self._block(index, len(out), recs, self.DATA_SIZE)
+        recs = [struct.pack("<ii", row, owner)
+                for row, owner in enumerate(owners)]
+        out += self._block(2, len(out), recs, self.OWNER_SIZE)
+        out += self._footer(3, len(out), first, length)
+        return out
+
+    def test_a_consistent_directory_is_accepted(self):
+        tables = parse_stamped_tables(self._payload(), "Item.edf")
+        self.assertEqual(len(tables), 4)
+        self.assertEqual(build_stamped_tables(tables), self._payload())
+
+    def test_refuses_a_gap_between_slices(self):
+        # block 1's slice starts at row 3, but block 0's ends at row 2
+        with self.assertRaises(StampedDirectoryError) as caught:
+            parse_stamped_tables(
+                self._payload(owners=(0, 0, 1, 1, 1), first=(0, 3, 0),
+                              length=(2, 3, 0)), "Item.edf")
+        self.assertIn("contiguous", str(caught.exception))
+
+    def test_refuses_overlapping_slices(self):
+        with self.assertRaises(StampedDirectoryError):
+            parse_stamped_tables(
+                self._payload(owners=(0, 0, 1, 1, 1), first=(0, 1, 0),
+                              length=(2, 3, 0)), "Item.edf")
+
+    def test_refuses_a_row_whose_owner_field_disagrees(self):
+        # the ranges tile perfectly; row 2 just names the wrong block
+        with self.assertRaises(StampedDirectoryError) as caught:
+            parse_stamped_tables(
+                self._payload(owners=(0, 0, 0, 1, 1)), "Item.edf")
+        self.assertIn("row 2", str(caught.exception))
+
+    def test_refuses_a_negative_row_count(self):
+        with self.assertRaises(StampedDirectoryError):
+            parse_stamped_tables(
+                self._payload(first=(0, 2, 0),
+                              length=(2, 0xFFFFFFFF, 0)), "Item.edf")
+
+    def test_a_bad_directory_still_rebuilds_byte_exactly(self):
+        """Which is exactly why the check has to exist.
+
+        The round trip cannot see this: the bytes are all still there and in
+        the right order. Only the two halves' meanings disagree.
+        """
+        bad = self._payload(owners=(0, 0, 0, 1, 1))
+        with self.assertRaises(StampedDirectoryError):
+            parse_stamped_tables(bad, "Item.edf")
+        blocks = [b for b in stamp_layout(bad)]
+        self.assertEqual(len(blocks), 4)          # the walk itself is fine
+        self.assertEqual(sum(10 + body for _, body, _ in blocks), len(bad))
+
+    def test_leaves_a_stamped_payload_with_no_such_footer_alone(self):
+        """One file is in this format; a check that fired on another would be
+        a claim about bytes nobody has read."""
+        out = b""
+        for index in (0, 1):
+            recs = [struct.pack("<i", index)] * 2
+            out += self._block(index, len(out), recs, self.DATA_SIZE)
+        tables = parse_stamped_tables(out, "NotItem.edf")
+        self.assertEqual(len(tables), 2)
+        self.assertTrue(all(t.headed for t in tables))
+
+    def test_does_not_recompute_the_directory_on_write(self):
+        """A rebuild that fixed the directory would mask the bad edit."""
+        tables = parse_stamped_tables(self._payload(), "Item.edf")
+        footer = tables[-1]
+        name = footer.schema[3][0]      # length[0]: block 0's row count
+        footer.rows[0][name] = 1
+        rebuilt = build_stamped_tables(tables)
+        self.assertNotEqual(rebuilt, self._payload())
+        with self.assertRaises(StampedDirectoryError):
+            parse_stamped_tables(rebuilt, "Item.edf")
 
 
 if __name__ == "__main__":
