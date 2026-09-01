@@ -9,7 +9,7 @@ Global options (--repo, --server, --root) go BEFORE the subcommand.
     python rf_repo.py --repo D:\\rf-data --root server --server "C:\\...\\1_Server AOP" create
     python rf_repo.py --repo D:\\rf-data --root client --server "C:\\...\\2_Client AOP" create
     python rf_repo.py --repo D:\\rf-data status
-    python rf_repo.py --repo D:\\rf-data build [--confirm]
+    python rf_repo.py --repo D:\\rf-data build [--confirm] [--allow-create]
 
 `--repo` can point at a single root (has rfrepo.json directly) or at the
 rf-data parent of named roots (server/, client/): status/build/sync-files
@@ -618,6 +618,10 @@ class Status(object):
     """One table's state: how the repo compares to the server."""
 
     SAME, CHANGED, GONE, ERROR = "same", "changed", "missing", "error"
+    # A manifest entry with no copy in repo/files/: distinct from ERROR
+    # because it must not block building everything else (#79/#84's
+    # ServerState.ini) -- there is simply nothing to write for this one.
+    NOREPO = "no_repo"
 
     TABLE, FILE = "table", "file"
 
@@ -732,7 +736,10 @@ def diff_files(repo, server_root, manifest):
         repo_path = os.path.join(repo, "files", native)
         live_path = os.path.join(server_root, native)
         if not os.path.exists(repo_path):
-            out.append(Status(key, Status.ERROR, "copy is missing from the repo",
+            out.append(Status(key, Status.NOREPO,
+                              "manifest lists it but there's no copy in "
+                              "files/ -- run sync-files to capture it, or "
+                              "drop the entry",
                               kind=Status.FILE))
             continue
         if not os.path.exists(live_path):
@@ -821,16 +828,23 @@ def field_changes(repo, rel, server_root, limit=500):
 # ------------------------------------------------------------------- build
 
 def build_to_server(repo, server_root=None, only=None, apply=False,
-                    progress=None):
-    """Write changed tables back to the server. Returns (written, backup_dir).
+                    allow_create=False, progress=None):
+    """Write changed (and, with allow_create, missing) entries to the server.
 
-    With apply=False nothing is written; the return value is the list that
-    *would* be written, which is what the GUI previews.
+    Returns (written, backup_dir). With apply=False nothing is written; the
+    return value is the list that *would* be written, which is what the GUI
+    previews.
+
+    GONE entries -- present in the repo, absent from the install -- are
+    never included unless allow_create is set: build must never silently
+    repopulate a live install that is deliberately thin (#79).
     """
     manifest = read_manifest(repo)
     server_root = server_root or manifest["server_root"]
     statuses = diff_repo(repo, server_root, progress=progress)
     pending = [s for s in statuses if s.state == Status.CHANGED]
+    if allow_create:
+        pending += [s for s in statuses if s.state == Status.GONE]
     if only is not None:
         wanted = set(only)
         pending = [s for s in pending if s.rel in wanted]
@@ -849,9 +863,12 @@ def build_to_server(repo, server_root=None, only=None, apply=False,
             progress(i, len(pending), "writing " + s.rel)
         native = s.rel.replace("/", os.sep)
         live_path = os.path.join(server_root, native)
-        bak = os.path.join(backup_dir, native)
-        os.makedirs(os.path.dirname(bak), exist_ok=True)
-        shutil.copy2(live_path, bak)
+        os.makedirs(os.path.dirname(live_path), exist_ok=True)
+        if os.path.exists(live_path):
+            bak = os.path.join(backup_dir, native)
+            os.makedirs(os.path.dirname(bak), exist_ok=True)
+            shutil.copy2(live_path, bak)
+        # else: new file, nothing to back up.
 
         if s.kind == Status.FILE:
             # Verbatim: copy the bytes back exactly as they sit in the repo.
@@ -968,6 +985,7 @@ def cmd_status(args):
         changed = [s for s in statuses if s.state == Status.CHANGED]
         broken = [s for s in statuses if s.state == Status.ERROR]
         gone = [s for s in statuses if s.state == Status.GONE]
+        norepo = [s for s in statuses if s.state == Status.NOREPO]
         if changed:
             print("WOULD CHANGE (%d):" % len(changed))
             for s in changed:
@@ -980,10 +998,19 @@ def cmd_status(args):
                 print("  %-58s %s" % (s.rel[-58:], s.detail[:60]))
             print()
         if gone:
-            print("in the repo but not on the install: %d\n" % len(gone))
-        print("%d unchanged, %d changed, %d missing, %d broken"
-              % (len(statuses) - len(changed) - len(broken) - len(gone),
-                 len(changed), len(gone), len(broken)))
+            print("in the repo but not on the install: %d (build --confirm "
+                  "--allow-create places these)\n" % len(gone))
+        if norepo:
+            print("WARNING -- tracked in the manifest but missing from the "
+                  "repo's files/ (%d), skipped rather than blocking build:"
+                  % len(norepo))
+            for s in norepo:
+                print("  %-58s %s" % (s.rel[-58:], s.detail[:60]))
+            print()
+        print("%d unchanged, %d changed, %d missing, %d broken, %d no-repo"
+              % (len(statuses) - len(changed) - len(broken) - len(gone)
+                 - len(norepo),
+                 len(changed), len(gone), len(broken), len(norepo)))
         any_broken = any_broken or bool(broken)
     return 1 if any_broken else 0
 
@@ -995,19 +1022,28 @@ def cmd_build(args):
         if name:
             print("=== %s ===" % name)
         pending, backup = build_to_server(path, args.server,
-                                          apply=args.confirm, progress=_bar)
+                                          apply=args.confirm,
+                                          allow_create=args.allow_create,
+                                          progress=_bar)
         sys.stdout.write("\r" + " " * 78 + "\r")
         if not pending:
             print("Nothing to build -- the install already matches the repo.")
             continue
         for s in pending:
-            print("  %-58s %s" % (s.rel[-58:], s.detail))
+            tag = "[create]" if s.state == Status.GONE else "[update]"
+            print("  %s %-49s %s" % (tag, s.rel[-49:], s.detail))
+        created = sum(1 for s in pending if s.state == Status.GONE)
+        updated = len(pending) - created
         if args.confirm:
-            print("\nWrote %d file(s). Originals backed up to\n  %s"
-                  % (len(pending), backup))
+            print("\nWrote %d file(s): %d updated, %d created."
+                  % (len(pending), updated, created))
+            if updated:
+                print("Originals of updated files backed up to\n  %s"
+                      % backup)
         else:
-            print("\n%d file(s) would change. Nothing written -- re-run with "
-                  "--confirm to apply." % len(pending))
+            print("\n%d file(s) would change (%d update, %d create). Nothing "
+                  "written -- re-run with --confirm to apply." %
+                  (len(pending), updated, created))
     return 0
 
 
@@ -1030,13 +1066,22 @@ def main(argv=None):
     sub.add_parser("create", help="install -> new repo").set_defaults(
         func=cmd_create)
     sub.add_parser("sync-files",
-                   help="refresh only the verbatim files"
+                   help="refresh only the verbatim files -- reads install "
+                   "-> repo and rewrites the manifest from what it finds, "
+                   "so on an install missing files the repo tracks it will "
+                   "DROP those entries from rf-data. The opposite direction "
+                   "from build; never use it to place a missing file."
                    ).set_defaults(func=cmd_sync_files)
     sub.add_parser("status", help="what would change on the install").set_defaults(
         func=cmd_status)
     b = sub.add_parser("build", help="write changed tables to the install")
     b.add_argument("--confirm", action="store_true",
                    help="actually write (without it, only lists changes)")
+    b.add_argument("--allow-create", action="store_true",
+                   help="also create entries the repo tracks but the "
+                   "install lacks. Opt-in and never implied by --confirm "
+                   "alone, so build can't silently repopulate a live "
+                   "install that's deliberately thin.")
     b.set_defaults(func=cmd_build)
     args = p.parse_args(argv)
     return args.func(args)
