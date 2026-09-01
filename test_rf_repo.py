@@ -21,8 +21,12 @@ def _write(path, data=b""):
         f.write(data)
 
 
-def _make_repo(tmp, files):
-    """A minimal repo (no tables) with one files/ entry per (rel, blob)."""
+def _make_repo(tmp, files, state=()):
+    """A minimal repo (no tables) with one files/ entry per (rel, blob).
+
+    `state` names keys (a subset of `files`) that go into manifest["state"]
+    -- the BACKLOG #85 runtime-state category.
+    """
     repo = os.path.join(tmp, "repo")
     server_root = os.path.join(tmp, "server")
     os.makedirs(repo)
@@ -39,7 +43,8 @@ def _make_repo(tmp, files):
     import json
     with open(os.path.join(repo, "rfrepo.json"), "w") as f:
         json.dump({"server_root": server_root, "tables": {},
-                   "files": manifest_files, "secrets": {}}, f)
+                   "files": manifest_files, "secrets": {},
+                   "state": sorted(state)}, f)
     return repo, server_root
 
 
@@ -140,6 +145,62 @@ class NoRepoStatusTests(unittest.TestCase):
                                 allow_create=True)
             self.assertFalse(
                 os.path.exists(os.path.join(server_root, "Map", "a.txt")))
+
+
+class StateFilesTests(unittest.TestCase):
+    """BACKLOG #85: manifest["state"] entries (SystemSave/*_Boss.ini) are
+    runtime state the running server rewrites on its own -- never compared,
+    never overwritten, only seeded onto an install that lacks them entirely.
+    """
+
+    def test_state_entry_never_reported_as_changed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, server_root = _make_repo(
+                tmp, {"SystemSave/Boss1_Boss.ini": b"repo snapshot"},
+                state=["SystemSave/Boss1_Boss.ini"])
+            _write(os.path.join(server_root, "SystemSave", "Boss1_Boss.ini"),
+                  b"live, rewritten by the server, differs from the repo")
+            statuses = diff_repo(repo, server_root)
+            self.assertEqual(statuses, [])
+
+    def test_seed_state_places_missing_state_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, server_root = _make_repo(
+                tmp, {"SystemSave/Boss1_Boss.ini": b"seed"},
+                state=["SystemSave/Boss1_Boss.ini"])
+            pending, backup = build_to_server(repo, server_root, apply=True,
+                                              seed_state=True)
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0].state, Status.GONE)
+            live = os.path.join(server_root, "SystemSave", "Boss1_Boss.ini")
+            with open(live, "rb") as f:
+                self.assertEqual(f.read(), b"seed")
+
+    def test_seed_state_never_overwrites_existing_state_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, server_root = _make_repo(
+                tmp, {"SystemSave/Boss1_Boss.ini": b"seed"},
+                state=["SystemSave/Boss1_Boss.ini"])
+            live = os.path.join(server_root, "SystemSave", "Boss1_Boss.ini")
+            _write(live, b"live boss state, must survive")
+            pending, backup = build_to_server(repo, server_root, apply=True,
+                                              seed_state=True)
+            self.assertEqual(pending, [])
+            with open(live, "rb") as f:
+                self.assertEqual(f.read(), b"live boss state, must survive")
+
+    def test_allow_create_alone_does_not_seed_state(self):
+        # --allow-create must not reach state entries -- only --seed-state
+        # does, so the two opt-ins stay independently meaningful.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, server_root = _make_repo(
+                tmp, {"SystemSave/Boss1_Boss.ini": b"seed"},
+                state=["SystemSave/Boss1_Boss.ini"])
+            pending, backup = build_to_server(repo, server_root, apply=True,
+                                              allow_create=True)
+            self.assertEqual(pending, [])
+            self.assertFalse(os.path.exists(
+                os.path.join(server_root, "SystemSave", "Boss1_Boss.ini")))
 
 
 if __name__ == "__main__":

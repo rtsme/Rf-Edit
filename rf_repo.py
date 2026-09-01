@@ -9,7 +9,7 @@ Global options (--repo, --server, --root) go BEFORE the subcommand.
     python rf_repo.py --repo D:\\rf-data --root server --server "C:\\...\\1_Server AOP" create
     python rf_repo.py --repo D:\\rf-data --root client --server "C:\\...\\2_Client AOP" create
     python rf_repo.py --repo D:\\rf-data status
-    python rf_repo.py --repo D:\\rf-data build [--confirm] [--allow-create]
+    python rf_repo.py --repo D:\\rf-data build [--confirm] [--allow-create] [--seed-state]
 
 `--repo` can point at a single root (has rfrepo.json directly) or at the
 rf-data parent of named roots (server/, client/): status/build/sync-files
@@ -302,11 +302,34 @@ def find_client_verbatim(root):
 # Named root profiles for the CLI's --root flag. "server" is the historic
 # default: full .dat conversion plus VERBATIM_EXTS (.ini) copying. "client"
 # is verbatim-only -- see the CLIENT_* constants above.
+#
+# "server" also carries state_patterns (BACKLOG #85): files/ entries matching
+# one of these are runtime state the running server rewrites on its own, not
+# stable config. The whole SystemSave/ directory qualifies -- not just the 25
+# *_Boss.ini boss-respawn files, but also ServerDisplay.ini (uptime/user
+# counts/connection stats, rewritten continuously); RfServer's own .gitignore
+# already excludes the entire directory on the same theory (BACKLOG #84).
+# They stay tracked (a fresh install still needs them, spec 02 §5), but are
+# never compared or overwritten by ordinary status/build -- see
+# compute_state_keys() and build_to_server()'s seed_state.
 ROOT_PROFILES = {
-    "server": {"convert": True, "find_fn": None, "gitattributes": GITATTRIBUTES},
+    "server": {"convert": True, "find_fn": None, "gitattributes": GITATTRIBUTES,
+              "state_patterns": ["Zoneserver/SystemSave/*"]},
     "client": {"convert": False, "find_fn": find_client_verbatim,
               "gitattributes": CLIENT_GITATTRIBUTES},
 }
+
+
+def compute_state_keys(files, profile):
+    """Which files/ entries (a dict as returned by export_files) are runtime
+    state the install rewrites on its own, per the owning profile's
+    state_patterns. Returns a sorted list of keys, a subset of `files`.
+    """
+    patterns = ROOT_PROFILES.get(profile, {}).get("state_patterns", [])
+    if not patterns:
+        return []
+    return sorted(k for k in files
+                 if any(fnmatch.fnmatch(k, pat) for pat in patterns))
 
 
 def find_secrets(blob):
@@ -495,6 +518,7 @@ def create_repo(server_root, repo, progress=None, include=None, convert=True,
         "skipped": {rel.replace("\\", "/"): why for rel, why in skipped},
         "files": files,
         "secrets": secrets,
+        "state": compute_state_keys(files, profile),
     }
     os.makedirs(repo, exist_ok=True)
     write_manifest(repo, manifest)
@@ -532,7 +556,15 @@ def write_repo_meta(repo, server_root, manifest, n_dats=None,
             "%d file(s) are copied byte for byte under `files/`. Editing one "
             "in the repo and building copies exactly those bytes back to the "
             "install." % len(files))
+    state = manifest.get("state", [])
     gitignore = GITIGNORE
+    if state:
+        coverage += (
+            "\n\n%d of those config files are runtime state the running "
+            "server rewrites on its own (BACKLOG #85), not stable config -- "
+            "`status`/`build` never compare or overwrite one; `build "
+            "--confirm --seed-state` places only whichever are entirely "
+            "absent from the install." % len(state))
     if secrets:
         coverage += (
             "\n\n%d of those config files contain credentials and are listed "
@@ -578,6 +610,7 @@ def sync_files(repo, server_root=None, exts=VERBATIM_EXTS, progress=None):
                                   find_fn=find_fn)
     manifest["files"] = files
     manifest["secrets"] = secrets
+    manifest["state"] = compute_state_keys(files, profile)
     write_manifest(repo, manifest)
     write_repo_meta(repo, server_root, manifest, gitattributes=gitattributes)
     return files, secrets
@@ -726,11 +759,18 @@ def diff_files(repo, server_root, manifest):
     deliberately left out of repo/files/ (rule 12: secrets never enter git,
     only .example templates are tracked) - it is not a broken table, so it
     is skipped here rather than reported as ERROR and blocking every build.
+
+    A key listed in manifest["state"] (BACKLOG #85) is runtime state the
+    running server rewrites on its own -- comparing it to the repo's snapshot
+    would report drift that is expected and never "wrong", so it is skipped
+    here the same way. build_to_server's seed_state is the only path that
+    ever writes one, and only when the install lacks it entirely.
     """
     out = []
     secrets = manifest.get("secrets", {})
+    state = set(manifest.get("state", []))
     for key in sorted(manifest.get("files", {})):
-        if key in secrets:
+        if key in secrets or key in state:
             continue
         native = key.replace("/", os.sep)
         repo_path = os.path.join(repo, "files", native)
@@ -828,7 +868,7 @@ def field_changes(repo, rel, server_root, limit=500):
 # ------------------------------------------------------------------- build
 
 def build_to_server(repo, server_root=None, only=None, apply=False,
-                    allow_create=False, progress=None):
+                    allow_create=False, seed_state=False, progress=None):
     """Write changed (and, with allow_create, missing) entries to the server.
 
     Returns (written, backup_dir). With apply=False nothing is written; the
@@ -838,6 +878,13 @@ def build_to_server(repo, server_root=None, only=None, apply=False,
     GONE entries -- present in the repo, absent from the install -- are
     never included unless allow_create is set: build must never silently
     repopulate a live install that is deliberately thin (#79).
+
+    manifest["state"] entries (BACKLOG #85: e.g. the 26 SystemSave/*_Boss.ini
+    boss-respawn files) never appear in `statuses` at all -- diff_files skips
+    them, so allow_create can't reach them either. seed_state is the one way
+    to write one, and only for whichever are entirely absent from the
+    install: never overwrites one that already exists, however different its
+    content, because that content is live server state, not stale data.
     """
     manifest = read_manifest(repo)
     server_root = server_root or manifest["server_root"]
@@ -845,6 +892,16 @@ def build_to_server(repo, server_root=None, only=None, apply=False,
     pending = [s for s in statuses if s.state == Status.CHANGED]
     if allow_create:
         pending += [s for s in statuses if s.state == Status.GONE]
+    if seed_state:
+        for key in manifest.get("state", []):
+            native = key.replace("/", os.sep)
+            if os.path.exists(os.path.join(server_root, native)):
+                continue  # already there -- never overwrite live state
+            if not os.path.exists(os.path.join(repo, "files", native)):
+                continue  # nothing captured to seed from
+            pending.append(Status(key, Status.GONE,
+                                  "seed: absent from install (runtime "
+                                  "state, written once)", kind=Status.FILE))
     if only is not None:
         wanted = set(only)
         pending = [s for s in pending if s.rel in wanted]
@@ -980,6 +1037,8 @@ def cmd_status(args):
     for name, path in roots:
         if name:
             print("=== %s ===" % name)
+        manifest = read_manifest(path)
+        n_state = len(manifest.get("state", []))
         statuses = diff_repo(path, args.server, progress=_bar)
         sys.stdout.write("\r" + " " * 78 + "\r")
         changed = [s for s in statuses if s.state == Status.CHANGED]
@@ -1007,6 +1066,12 @@ def cmd_status(args):
             for s in norepo:
                 print("  %-58s %s" % (s.rel[-58:], s.detail[:60]))
             print()
+        if n_state:
+            print("runtime state, not compared (%d): the running server "
+                  "rewrites these on its own (e.g. boss respawn state); "
+                  "ordinary status/build never touches them -- 'build "
+                  "--confirm --seed-state' places only whichever are "
+                  "entirely absent from the install\n" % n_state)
         print("%d unchanged, %d changed, %d missing, %d broken, %d no-repo"
               % (len(statuses) - len(changed) - len(broken) - len(gone)
                  - len(norepo),
@@ -1024,6 +1089,7 @@ def cmd_build(args):
         pending, backup = build_to_server(path, args.server,
                                           apply=args.confirm,
                                           allow_create=args.allow_create,
+                                          seed_state=args.seed_state,
                                           progress=_bar)
         sys.stdout.write("\r" + " " * 78 + "\r")
         if not pending:
@@ -1082,6 +1148,14 @@ def main(argv=None):
                    "install lacks. Opt-in and never implied by --confirm "
                    "alone, so build can't silently repopulate a live "
                    "install that's deliberately thin.")
+    b.add_argument("--seed-state", action="store_true",
+                   help="also place manifest[\"state\"] entries (e.g. the "
+                   "SystemSave/*_Boss.ini boss-respawn files) that are "
+                   "entirely absent from the install -- never overwrites "
+                   "one that already exists, since that content is live "
+                   "server state, not stale data. Needed once on a "
+                   "genuinely fresh install; never implied by "
+                   "--allow-create.")
     b.set_defaults(func=cmd_build)
     args = p.parse_args(argv)
     return args.func(args)
