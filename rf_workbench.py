@@ -65,6 +65,11 @@ class Workbench(tk.Tk):
                                                    padx=10)
         self.btn_preview.pack(side="left", padx=(0, 6))
         self.btn_build.pack(side="left")
+        self.allow_create_var = tk.BooleanVar(value=False)
+        self.chk_allow_create = ttk.Checkbutton(
+            bar, text="Allow create (place tables missing from the server)",
+            variable=self.allow_create_var, command=self._refresh_buttons)
+        self.chk_allow_create.pack(side="left", padx=(10, 0))
 
         paths = ttk.Frame(self, padding=(10, 0))
         paths.pack(fill="x")
@@ -145,10 +150,11 @@ class Workbench(tk.Tk):
         self.btn_open_repo.config(state=state(True))
         self.btn_create.config(state=state(self.server is not None))
         self.btn_preview.config(state=state(self.repo is not None))
-        self.btn_build.config(
-            state=state(self.repo is not None
-                        and any(s.state == Status.CHANGED
-                                for s in self.statuses)))
+        can_build = any(s.state == Status.CHANGED for s in self.statuses)
+        if self.allow_create_var.get():
+            can_build = can_build or any(s.state == Status.GONE
+                                         for s in self.statuses)
+        self.btn_build.config(state=state(self.repo is not None and can_build))
 
     # ------------------------------------------------------- worker plumbing
 
@@ -398,7 +404,10 @@ class Workbench(tk.Tk):
                                      "", ""))
 
     def do_build(self):
+        allow_create = self.allow_create_var.get()
         pending = [s for s in self.statuses if s.state == Status.CHANGED]
+        if allow_create:
+            pending += [s for s in self.statuses if s.state == Status.GONE]
         broken = [s for s in self.statuses if s.state == Status.ERROR]
         if broken:
             messagebox.showerror(
@@ -411,15 +420,20 @@ class Workbench(tk.Tk):
             messagebox.showinfo("Nothing to build",
                                 "The server already matches the repo.")
             return
-        listing = "\n".join("  %s  (%s)" % (s.rel, s.detail)
-                            for s in pending[:15])
+        created = sum(1 for s in pending if s.state == Status.GONE)
+        updated = len(pending) - created
+        listing = "\n".join(
+            "  %s %s  (%s)" % ("[create]" if s.state == Status.GONE
+                               else "[update]", s.rel, s.detail)
+            for s in pending[:15])
         if len(pending) > 15:
             listing += "\n  ... and %d more" % (len(pending) - 15)
         if not messagebox.askokcancel(
                 "Build to server",
-                "About to overwrite %d .dat file(s) in\n%s\n\n%s\n\nOriginals "
-                "are backed up into the repo's backups/ folder first. "
-                "Continue?" % (len(pending), self.server, listing)):
+                "About to write %d .dat file(s) in\n%s (%d update, %d "
+                "create)\n\n%s\n\nOriginals of updated files are backed up "
+                "into the repo's backups/ folder first. Continue?"
+                % (len(pending), self.server, updated, created, listing)):
             return
 
         repo, server = self.repo, self.server
@@ -427,6 +441,7 @@ class Workbench(tk.Tk):
 
         def work(progress):
             return rf_repo.build_to_server(repo, server, only=only, apply=True,
+                                           allow_create=allow_create,
                                            progress=progress)
 
         def done(ok, result):
@@ -435,11 +450,15 @@ class Workbench(tk.Tk):
                 self._say("Build failed -- nothing was written.")
                 return
             written, backup = result
+            w_created = sum(1 for s in written if s.state == Status.GONE)
+            w_updated = len(written) - w_created
             messagebox.showinfo(
                 "Build complete",
-                "Wrote %d file(s) to the server.\n\nOriginals backed up to\n%s"
-                % (len(written), backup))
-            self._say("Built %d file(s). Backup: %s" % (len(written), backup))
+                "Wrote %d file(s) to the server: %d updated, %d created.\n\n"
+                "Originals of updated files backed up to\n%s"
+                % (len(written), w_updated, w_created, backup))
+            self._say("Built %d file(s): %d updated, %d created. Backup: %s"
+                      % (len(written), w_updated, w_created, backup))
             self.do_preview()
 
         self._run(work, done)
