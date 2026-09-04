@@ -633,5 +633,73 @@ class ClientVerbatimExclusionTests(unittest.TestCase):
                               rf_repo.find_client_verbatim(tmp))
 
 
+class ClientMapScanTests(unittest.TestCase):
+    """BACKLOG #109: find_client_verbatim never walked Map/ at all, so a
+    fresh `create --root client` silently dropped the 184 tracked
+    Map/**/*.txt files (mob-spawn dummies and per-map error strings,
+    BACKLOG #38) -- no error, just a manifest 184 entries short. Every
+    fixture here is synthetic (rule 12).
+    """
+
+    def test_map_txt_file_is_scanned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(os.path.join(tmp, "Map", "Cauldron01", "Dummy.txt"),
+                   b"<MobDummy>...")
+            kept = [rel.replace(os.sep, "/")
+                    for rel in rf_repo.find_client_verbatim(tmp)]
+            self.assertIn("Map/Cauldron01/Dummy.txt", kept)
+
+    def test_map_bulk_asset_is_not_scanned(self):
+        # The other side of #109's ruling: widening Map/'s scan must not
+        # pull in the mesh/texture bulk that spec 02 S1 sends to the asset
+        # store -- an extension allowlist, not a directory grant.
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(os.path.join(tmp, "Map", "Cauldron01", "Cauldron01.mst"),
+                   b"\x00\x01")
+            _write(os.path.join(tmp, "Map", "Cauldron01", "tex.dds"), b"")
+            kept = rf_repo.find_client_verbatim(tmp)
+            self.assertNotIn("Map/Cauldron01/Cauldron01.mst", kept)
+            self.assertNotIn("Map/Cauldron01/tex.dds", kept)
+
+    def test_map_bulk_asset_is_not_reported_excluded(self):
+        # Same reasoning as the DataTable/System asset case: Map/'s bulk
+        # files are the expected majority of the directory, not a surprise
+        # worth printing -- they're never a find_client_verbatim candidate
+        # in the first place, so they must not show up in the excluded list
+        # either.
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(os.path.join(tmp, "Map", "Cauldron01", "tex.dds"), b"")
+            self.assertNotIn(
+                "Map/Cauldron01/tex.dds",
+                [rel for rel, _why in rf_repo.find_client_excluded(tmp)])
+
+    def test_widening_map_scan_wholesale_would_leak_bulk(self):
+        # Mutation check (done-when: "would have caught the drop" cuts both
+        # ways -- it must also catch the wrong fix). If #109 had been fixed
+        # by adding "Map" to CLIENT_SCAN_DIRS with no entry in
+        # CLIENT_SCAN_DIR_EXTS, the directory would be walked in full, the
+        # same as DataTable/System, and the bulk .mst file would leak in.
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(os.path.join(tmp, "Map", "Cauldron01", "Cauldron01.mst"),
+                   b"\x00\x01")
+            with unittest.mock.patch.object(
+                    rf_repo, "CLIENT_SCAN_DIR_EXTS", {}):
+                kept = [rel.replace(os.sep, "/")
+                        for rel in rf_repo.find_client_verbatim(tmp)]
+                self.assertIn("Map/Cauldron01/Cauldron01.mst", kept)
+
+    def test_removing_map_from_scan_dirs_would_reproduce_the_original_bug(self):
+        # Mutation check the other direction: without "Map" in
+        # CLIENT_SCAN_DIRS at all, the .txt file is dropped again -- the
+        # exact BACKLOG #109 failure.
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(os.path.join(tmp, "Map", "Cauldron01", "Dummy.txt"),
+                   b"<MobDummy>...")
+            with unittest.mock.patch.object(
+                    rf_repo, "CLIENT_SCAN_DIRS", ("DataTable", "System")):
+                self.assertNotIn("Map/Cauldron01/Dummy.txt",
+                                 rf_repo.find_client_verbatim(tmp))
+
+
 if __name__ == "__main__":
     unittest.main()
