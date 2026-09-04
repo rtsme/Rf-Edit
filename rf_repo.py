@@ -136,6 +136,21 @@ CLIENT_EXCLUDE_PATHS = (
     "System/Shader/init.r3o",
 )
 
+# Runtime output whose name isn't fixed -- a launch timestamp is baked into
+# it, so no exact entry in CLIENT_EXCLUDE_PATHS above can ever match it
+# (BACKLOG #110). Matched with fnmatch, unlike CLIENT_EXCLUDE_PATHS's plain
+# `in`.
+CLIENT_EXCLUDE_GLOBS = (
+    "hud-panels.log.*",
+)
+
+# A tracked `<name>.example` beside a file is, by construction, the sign that
+# the file itself is the untracked real one -- rule 12's shape, generalised
+# past rfacc.ini (BACKLOG #110). assets.secrets.json is the case that found
+# it: find_secrets doesn't flag it, because its keys aren't credential-shaped,
+# but it sits beside a tracked assets.secrets.json.example.
+CLIENT_EXAMPLE_TWIN_SUFFIX = ".example"
+
 # Key names that make a setting a credential. Matched as substrings of the key,
 # because the real one on this server is "DB_Password" -- an earlier version of
 # this used a \b word boundary and missed it, since there is no boundary
@@ -367,11 +382,10 @@ def find_verbatim(root, exts=VERBATIM_EXTS):
     return sorted(out)
 
 
-def find_client_verbatim(root):
-    """Every client file that belongs in client/files/ -- see CLIENT_* above.
-
-    Restricted to DataTable/, System/ and the loose files at the client root;
-    everything else (the bulk asset directories) is out of scope for #10.
+def _client_candidates(root):
+    """Every file under CLIENT_SCAN_DIRS plus the loose files at the client
+    root, before CLIENT_* exclusion -- the raw scan find_client_verbatim and
+    find_client_excluded both filter.
     """
     out = []
     for name in CLIENT_SCAN_DIRS:
@@ -384,16 +398,61 @@ def find_client_verbatim(root):
     for fn in os.listdir(root):
         if os.path.isfile(os.path.join(root, fn)):
             out.append(fn)
+    return out
 
-    def keep(rel):
-        key = rel.replace("\\", "/")
-        if (key in CLIENT_EXCLUDE_PATHS or key in CLIENT_ASSET_PATH_OVERRIDES
-                or key in CLIENT_META_EXCLUDE_PATHS):
-            return False
-        ext = os.path.splitext(key)[1].lower()
-        return ext not in CLIENT_ASSET_EXTS and ext not in CLIENT_BINARY_EXTS
 
-    return sorted(rel for rel in out if keep(rel))
+# Reasons _client_exclude_reason returns that are worth reporting -- see
+# find_client_excluded. Asset/binary/meta exclusions are the expected bulk of
+# the scan, not a surprise, and stay silent as before.
+REPORTABLE_CLIENT_EXCLUSIONS = ("runtime output",
+                                "credential (tracked .example twin)")
+
+
+def _client_exclude_reason(root, rel):
+    """None to keep `rel` in client/files/; otherwise why it's left out.
+
+    Order is specificity, not that any file matches two rules.
+    """
+    key = rel.replace("\\", "/")
+    if key in CLIENT_EXCLUDE_PATHS or any(
+            fnmatch.fnmatch(key, pat) for pat in CLIENT_EXCLUDE_GLOBS):
+        return "runtime output"
+    if key in CLIENT_ASSET_PATH_OVERRIDES:
+        return "asset"
+    if key in CLIENT_META_EXCLUDE_PATHS:
+        return "rf-client repo metadata"
+    ext = os.path.splitext(key)[1].lower()
+    if ext in CLIENT_ASSET_EXTS:
+        return "asset"
+    if ext in CLIENT_BINARY_EXTS:
+        return "binary"
+    if os.path.isfile(os.path.join(root, rel) + CLIENT_EXAMPLE_TWIN_SUFFIX):
+        return "credential (tracked .example twin)"
+    return None
+
+
+def find_client_verbatim(root):
+    """Every client file that belongs in client/files/ -- see CLIENT_* above.
+
+    Restricted to DataTable/, System/ and the loose files at the client root;
+    everything else (the bulk asset directories) is out of scope for #10.
+    """
+    return sorted(rel for rel in _client_candidates(root)
+                 if _client_exclude_reason(root, rel) is None)
+
+
+def find_client_excluded(root):
+    """(rel, reason) for every candidate find_client_verbatim drops for a
+    REPORTABLE_CLIENT_EXCLUSIONS reason, so a fresh create/sync-files can
+    report what it left out instead of dropping it silently -- a file
+    dropped silently is how BACKLOG #109 and #110 both got found.
+    """
+    out = []
+    for rel in _client_candidates(root):
+        reason = _client_exclude_reason(root, rel)
+        if reason in REPORTABLE_CLIENT_EXCLUSIONS:
+            out.append((rel, reason))
+    return sorted(out)
 
 
 # Named root profiles for the CLI's --root flag. "server" is the historic
@@ -416,10 +475,12 @@ def find_client_verbatim(root):
 # passes over separate file sets, and a root could one day want both.
 ROOT_PROFILES = {
     "server": {"convert": True, "convert_edf": False, "find_fn": None,
+              "excluded_fn": None,
               "gitattributes": GITATTRIBUTES,
               "state_patterns": ["Zoneserver/SystemSave/*"]},
     "client": {"convert": False, "convert_edf": True,
               "find_fn": find_client_verbatim,
+              "excluded_fn": find_client_excluded,
               "gitattributes": CLIENT_GITATTRIBUTES},
 }
 
@@ -1410,6 +1471,28 @@ def resolve_roots(repo, root_arg):
     return [(name, os.path.join(repo, name)) for name in names]
 
 
+def _print_client_excluded(server_root, profile):
+    """Report what ROOT_PROFILES[profile]'s excluded_fn left out of
+    files/, the way secrets are reported -- a file dropped silently is how
+    BACKLOG #109 and #110 both got found. No-op for a profile without one.
+    """
+    excluded_fn = ROOT_PROFILES.get(profile, {}).get("excluded_fn")
+    if not excluded_fn:
+        return
+    excluded = excluded_fn(server_root)
+    if not excluded:
+        return
+    print("  %d file(s) excluded -- not copied, not committed:"
+          % len(excluded))
+    reasons = {}
+    for rel, why in excluded:
+        reasons.setdefault(why, []).append(rel)
+    for why, rels in sorted(reasons.items(), key=lambda kv: -len(kv[1])):
+        print("    %5d  %-32s %s" % (len(rels), why, rels[0]))
+        for rel in rels[1:]:
+            print("           %-32s %s" % ("", rel))
+
+
 def cmd_create(args):
     if not args.server:
         raise SystemExit("--server is required for create")
@@ -1431,6 +1514,7 @@ def cmd_create(args):
     for why, rels in sorted(reasons.items(), key=lambda kv: -len(kv[1])):
         print("    %5d  %s" % (len(rels), why[:90]))
     print("  %d file(s) copied verbatim" % len(manifest.get("files", {})))
+    _print_client_excluded(args.server, profile)
     return 0
 
 
@@ -1447,6 +1531,8 @@ def cmd_sync_files(args):
     for name, path in roots:
         if name:
             print("=== %s ===" % name)
+        before = read_manifest(path)
+        server_root = args.server or before["server_root"]
         files, secrets = sync_files(path, args.server, progress=_bar)
         sys.stdout.write("\r" + " " * 78 + "\r")
         print("%d file(s) copied into files/" % len(files))
@@ -1457,6 +1543,7 @@ def cmd_sync_files(args):
                 print("  %-56s (%s)" % (key, ", ".join(secrets[key])))
             print("\nThey are still on disk and still build back to the "
                   "install; they just won't be committed.")
+        _print_client_excluded(server_root, before.get("profile"))
     return 0
 
 
