@@ -74,7 +74,7 @@ HASH_WORKERS = 16
 # lose, since rewriting a config file is how you change behaviour by accident.
 VERBATIM_EXTS = (".ini",)
 
-# --- the client root (BACKLOG #9/#10/#100) ---------------------------------
+# --- the client root (BACKLOG #9/#10/#100/#109) -----------------------------
 #
 # No client file uses the *server's* container format -- see
 # docs/knowledge/client-file-formats.md -- so nothing here is a .dat table.
@@ -82,10 +82,25 @@ VERBATIM_EXTS = (".ini",)
 # OdinTeam container whose payload is a chain of tables, read by rf_edf.py.
 # Everything else editable is still copied verbatim. The scan is restricted to
 # the directories #9 actually scanned: DataTable/, System/, and the loose
-# files at the client root. Map/, Character/, Chef/, item/, Effect/, Snd/,
-# SpriteImage/, Redist/ are the immutable bulk layer (spec 02 S1) and belong
-# to the asset store (#11) -- walking them here would be slow and wrong.
-CLIENT_SCAN_DIRS = ("DataTable", "System")
+# files at the client root -- plus Map/, added by #109 but only through
+# CLIENT_SCAN_DIR_EXTS below, never in full. Character/, Chef/, item/,
+# Effect/, Snd/, SpriteImage/, Redist/ stay out entirely: they are the
+# immutable bulk layer (spec 02 S1) and belong to the asset store (#11) --
+# walking them here would be slow and wrong.
+CLIENT_SCAN_DIRS = ("DataTable", "System", "Map")
+
+# Map/ is mostly bulk (spec 02 S1: .mst/.dds/.spt/.r3t/.r3m/... mesh, texture
+# and map-format data that belongs to the asset store, not rf-data) but also
+# holds 184 plain hand-editable .txt files -- mob-spawn dummies and per-map
+# error strings, BACKLOG #38's ruling that a bulk directory's per-file
+# contents are still judged per file. Scanning Map/ the way DataTable/ and
+# System/ are scanned (every file) would pull all of that bulk data in too,
+# so it gets its own entry here: an extension allowlist, not a directory
+# grant. Any CLIENT_SCAN_DIRS entry with no entry here is scanned in full, as
+# before -- this only narrows Map/.
+CLIENT_SCAN_DIR_EXTS = {
+    "Map": (".txt",),
+}
 
 # The client's converted format, handled by rf_edf.py rather than rf_dat.py.
 # One .edf holds many tables, so it converts to a *directory* of CSVs named
@@ -386,14 +401,23 @@ def _client_candidates(root):
     """Every file under CLIENT_SCAN_DIRS plus the loose files at the client
     root, before CLIENT_* exclusion -- the raw scan find_client_verbatim and
     find_client_excluded both filter.
+
+    A CLIENT_SCAN_DIR_EXTS entry narrows a directory to only the listed
+    extensions (Map/'s bulk-vs-editable split, BACKLOG #109); a directory
+    with no entry there is walked in full, as every CLIENT_SCAN_DIRS entry
+    used to be before Map/ needed the distinction.
     """
     out = []
     for name in CLIENT_SCAN_DIRS:
         sub = os.path.join(root, name)
         if not os.path.isdir(sub):
             continue
+        allowed_exts = CLIENT_SCAN_DIR_EXTS.get(name)
         for dirpath, _dirs, files in os.walk(sub):
             for fn in files:
+                if allowed_exts is not None and \
+                        os.path.splitext(fn)[1].lower() not in allowed_exts:
+                    continue
                 out.append(os.path.relpath(os.path.join(dirpath, fn), root))
     for fn in os.listdir(root):
         if os.path.isfile(os.path.join(root, fn)):
@@ -434,8 +458,10 @@ def _client_exclude_reason(root, rel):
 def find_client_verbatim(root):
     """Every client file that belongs in client/files/ -- see CLIENT_* above.
 
-    Restricted to DataTable/, System/ and the loose files at the client root;
-    everything else (the bulk asset directories) is out of scope for #10.
+    Restricted to DataTable/, System/ and the loose files at the client root,
+    plus Map/'s .txt files (BACKLOG #109, CLIENT_SCAN_DIR_EXTS); everything
+    else (the bulk asset directories, and Map/'s own bulk contents) is out
+    of scope.
     """
     return sorted(rel for rel in _client_candidates(root)
                  if _client_exclude_reason(root, rel) is None)
