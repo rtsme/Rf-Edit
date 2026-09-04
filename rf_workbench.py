@@ -372,6 +372,9 @@ class Workbench(tk.Tk):
         if s.kind == Status.FILE:
             self._show_text_diff(rel)
             return
+        if s.kind == Status.EDF:
+            self._show_edf_diff(rel)
+            return
         try:
             changes, delta = rf_repo.field_changes(self.repo, rel, self.server)
         except (SchemaError, ValueError, OSError) as e:
@@ -387,6 +390,25 @@ class Workbench(tk.Tk):
                              values=(rec, field, str(old)[:60], str(new)[:60]))
         if not changes and not delta:
             self.diff.insert("", "end", values=("", "(header only)", "", ""))
+
+    def _show_edf_diff(self, rel):
+        """An .edf holds many tables, so it diffs per table, not per field."""
+        try:
+            deltas, detail = rf_repo.edf_changes(self.repo, rel, self.server,
+                                                 limit=200)
+        except (SchemaError, ValueError, OSError) as e:
+            self.diff.insert("", "end", values=("", "error", "", str(e)[:120]))
+            return
+        if deltas is None:      # the install's own copy no longer reads back
+            self.diff.insert("", "end",
+                             values=("", "unreadable", "", detail[:90]))
+            return
+        if not deltas:
+            self.diff.insert("", "end", values=("", "(container only)", "", ""))
+            return
+        for i, why in deltas:
+            self.diff.insert("", "end", values=(
+                "" if i is None else i, "table", "", why[:90]))
 
     def _show_text_diff(self, rel):
         """Config files diff by line, not by field."""

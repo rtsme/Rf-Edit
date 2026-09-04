@@ -1,17 +1,21 @@
 """Unit tests for rf_repo.py's build/status handling of files an install
 lacks entirely (BACKLOG #79), manifest entries with no repo copy (#84's
-ServerState.ini case), and the credential filter that keeps secrets out of
-git (#107).
+ServerState.ini case), the credential filter that keeps secrets out of
+git (#107), and the client root's .edf conversion (#100).
 
 These build synthetic repo/server_root pairs directly -- no real client or
 server install needed.
 
 Run:  python -m unittest test_rf_repo -v
 """
+import json
 import os
+import struct
 import tempfile
 import unittest
+import unittest.mock
 
+import rf_edf
 import rf_repo
 from rf_dat import SchemaError
 from rf_repo import Status, build_to_server, diff_repo, sha_bytes
@@ -291,3 +295,228 @@ class SecretFilterTests(unittest.TestCase):
             self.assertIn("RF_Bin/clean.ini", files)
             self.assertTrue(os.path.exists(
                 os.path.join(repo, "files", "RF_Bin", "creds.ini")))
+
+
+class EdfRootTests(unittest.TestCase):
+    """BACKLOG #100: the client root converts .edf the way the server root
+    converts .dat -- create writes CSVs, status diffs tables, build rebuilds
+    the container byte-exactly.
+
+    Every fixture is a synthetic chain-format .edf built here, so these run
+    with no client install present. The real 32 files are proved separately,
+    by `rf_edf.py --check-tables` and by the scratch build in #100's PR.
+    """
+
+    KEY = bytes(range(256))
+
+    @staticmethod
+    def _edf(rows=4, key=None):
+        """A minimal chain .edf: one table of `rows` two-dword records."""
+        payload = (struct.pack("<2I", rows, 8)
+                   + b"".join(struct.pack("<2i", i, i * 2)
+                              for i in range(rows)))
+        return rf_edf.encrypt(payload, key or EdfRootTests.KEY)
+
+    @staticmethod
+    def _find_all(root):
+        out = []
+        for dirpath, _dirs, files in os.walk(root):
+            for fn in files:
+                out.append(os.path.relpath(os.path.join(dirpath, fn), root))
+        return sorted(out)
+
+    def _create(self, tmp, files):
+        server_root = os.path.join(tmp, "client")
+        for rel, blob in files.items():
+            _write(os.path.join(server_root, rel.replace("/", os.sep)), blob)
+        repo = os.path.join(tmp, "repo")
+        manifest, _tables, skipped = rf_repo.create_repo(
+            server_root, repo, convert=False, convert_edf=True,
+            find_fn=self._find_all,
+            gitattributes=rf_repo.CLIENT_GITATTRIBUTES)
+        return repo, server_root, manifest, skipped
+
+    def _edit_first_record(self, repo):
+        path = os.path.join(repo, "csv", "DataTable", "Thing.edf", "00.csv")
+        with open(path, "r", encoding="ascii") as f:
+            lines = f.read().splitlines()
+        lines[1] = "999,0"
+        with open(path, "w", encoding="ascii", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
+
+    def test_create_writes_one_csv_per_table_and_a_manifest_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _root, manifest, skipped = self._create(
+                tmp, {"DataTable/Thing.edf": self._edf()})
+            self.assertEqual(skipped, [])
+            entry = manifest["edf"]["DataTable/Thing.edf"]
+            self.assertEqual(
+                (entry["kind"], entry["tables"], entry["records"]),
+                ("chain", 1, 4))
+            for path in (("csv", "DataTable", "Thing.edf", "00.csv"),
+                         ("schemas", "DataTable", "Thing.edf", "00.json"),
+                         ("schemas", "DataTable", "Thing.edf",
+                          rf_repo.EDF_META)):
+                self.assertTrue(os.path.exists(os.path.join(repo, *path)),
+                                "/".join(path))
+
+    def test_a_converted_edf_is_not_also_copied_verbatim(self):
+        # Two copies of the same data in one repo disagree the moment one
+        # side is edited (spec 02 section 5). The .ini beside it still is one.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _root, manifest, _skipped = self._create(
+                tmp, {"DataTable/Thing.edf": self._edf(),
+                      "System/other.ini": b"a=1\r\n"})
+            self.assertNotIn("DataTable/Thing.edf", manifest["files"])
+            self.assertIn("System/other.ini", manifest["files"])
+            self.assertFalse(os.path.exists(os.path.join(
+                repo, "files", "DataTable", "Thing.edf")))
+
+    def test_an_edf_that_does_not_convert_stays_a_verbatim_blob(self):
+        # Verbatim is a supported end state, not a failure (spec 02 section
+        # 6): a file the codec cannot read must still reach the repo, or a
+        # clean clone could no longer rebuild a complete install.
+        opaque = rf_edf.encrypt(b"\xff" * 32, self.KEY)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _root, manifest, skipped = self._create(
+                tmp, {"DataTable/Opaque.edf": opaque})
+            self.assertEqual(manifest["edf"], {})
+            self.assertEqual([rel.replace(os.sep, "/")
+                              for rel, _why in skipped],
+                             ["DataTable/Opaque.edf"])
+            self.assertIn("DataTable/Opaque.edf", manifest["files"])
+            with open(os.path.join(repo, "files", "DataTable",
+                                   "Opaque.edf"), "rb") as f:
+                self.assertEqual(f.read(), opaque)
+
+    def test_an_edf_that_does_not_rebuild_is_rejected_and_cleaned_up(self):
+        # create's promise is that a file only enters the repo once its CSVs
+        # have been read back and rebuilt into the original bytes. The only
+        # way to reach that check is to make the rebuild wrong, so inject a
+        # codec fault: the entry must be dropped, its half-written directories
+        # removed, and the file left verbatim instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            with unittest.mock.patch.object(
+                    rf_repo.rf_edf, "build_payload",
+                    lambda kind, tables: b"wrong"):
+                repo, _root, manifest, skipped = self._create(
+                    tmp, {"DataTable/Thing.edf": self._edf()})
+            self.assertEqual(manifest["edf"], {})
+            self.assertEqual([why for _rel, why in skipped],
+                             ["CSV does not rebuild to the original bytes"])
+            self.assertFalse(os.path.exists(
+                os.path.join(repo, "csv", "DataTable", "Thing.edf")))
+            self.assertFalse(os.path.exists(
+                os.path.join(repo, "schemas", "DataTable", "Thing.edf")))
+            self.assertIn("DataTable/Thing.edf", manifest["files"])
+
+    def test_build_reproduces_the_container_byte_for_byte(self):
+        # Only possible because create froze the key: it travels inside the
+        # file, and the install is emptied here before the rebuild.
+        with tempfile.TemporaryDirectory() as tmp:
+            blob = self._edf()
+            repo, server_root, _m, _s = self._create(
+                tmp, {"DataTable/Thing.edf": blob})
+            live = os.path.join(server_root, "DataTable", "Thing.edf")
+            os.remove(live)
+            pending, _backup = build_to_server(repo, server_root, apply=True,
+                                               allow_create=True)
+            self.assertEqual([s.rel for s in pending],
+                             ["DataTable/Thing.edf"])
+            with open(live, "rb") as f:
+                self.assertEqual(f.read(), blob)
+
+    def test_status_is_same_when_nothing_moved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, server_root, _m, _s = self._create(
+                tmp, {"DataTable/Thing.edf": self._edf()})
+            states = {s.rel: s.state for s in diff_repo(repo, server_root)}
+            self.assertEqual(states["DataTable/Thing.edf"], Status.SAME)
+
+    def test_an_edited_csv_is_reported_per_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, server_root, _m, _s = self._create(
+                tmp, {"DataTable/Thing.edf": self._edf()})
+            self._edit_first_record(repo)
+            s = next(s for s in diff_repo(repo, server_root)
+                     if s.rel == "DataTable/Thing.edf")
+            self.assertEqual(s.state, Status.CHANGED)
+            self.assertEqual(s.kind, Status.EDF)
+            self.assertIn("table 0: 1 record(s) changed", s.detail)
+
+    def test_build_writes_the_edit_back_and_status_agrees_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, server_root, _m, _s = self._create(
+                tmp, {"DataTable/Thing.edf": self._edf()})
+            self._edit_first_record(repo)
+            build_to_server(repo, server_root, apply=True)
+            live = os.path.join(server_root, "DataTable", "Thing.edf")
+            _payload, _key, kind, tables = rf_edf.read_tables(live)
+            self.assertEqual(kind, "chain")
+            self.assertEqual(tables[0].rows[0]["Index"], 999)
+            states = {s.rel: s.state for s in diff_repo(repo, server_root)}
+            self.assertEqual(states["DataTable/Thing.edf"], Status.SAME)
+
+    def test_a_missing_layout_blocks_the_whole_build(self):
+        # A payload is its tables laid end to end, so losing 00.json would
+        # move every table after it: refuse rather than write a
+        # plausible-looking wrong .edf.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, server_root, _m, _s = self._create(
+                tmp, {"DataTable/Thing.edf": self._edf(),
+                      "System/other.ini": b"a=1\r\n"})
+            os.remove(os.path.join(repo, "schemas", "DataTable", "Thing.edf",
+                                   "00.json"))
+            _write(os.path.join(server_root, "System", "other.ini"), b"b=2\r\n")
+            s = next(s for s in diff_repo(repo, server_root)
+                     if s.rel == "DataTable/Thing.edf")
+            self.assertEqual(s.state, Status.ERROR)
+            with self.assertRaises(SchemaError):
+                build_to_server(repo, server_root, apply=True)
+            # Nothing was written -- not even the unrelated .ini that differs.
+            with open(os.path.join(server_root, "System", "other.ini"),
+                      "rb") as f:
+                self.assertEqual(f.read(), b"b=2\r\n")
+
+    def test_a_key_that_is_not_a_key_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, server_root, _m, _s = self._create(
+                tmp, {"DataTable/Thing.edf": self._edf()})
+            meta = os.path.join(repo, "schemas", "DataTable", "Thing.edf",
+                                rf_repo.EDF_META)
+            with open(meta, "r", encoding="ascii") as f:
+                doc = json.load(f)
+            doc["key"] = doc["key"][:-2]
+            with open(meta, "w", encoding="ascii", newline="\n") as f:
+                json.dump(doc, f)
+            s = next(s for s in diff_repo(repo, server_root)
+                     if s.rel == "DataTable/Thing.edf")
+            self.assertEqual(s.state, Status.ERROR)
+            self.assertIn("key is", s.detail)
+
+    def test_a_deleted_csv_is_noticed_by_the_repo_digest(self):
+        # repo_sha covers every member by name, so removing one changes it
+        # and status re-reads instead of trusting the manifest.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _root, manifest, _s = self._create(
+                tmp, {"DataTable/Thing.edf": self._edf()})
+            before = manifest["edf"]["DataTable/Thing.edf"]["repo_sha"]
+            os.remove(os.path.join(repo, "csv", "DataTable", "Thing.edf",
+                                   "00.csv"))
+            self.assertNotEqual(
+                rf_repo.edf_repo_sha(repo, "DataTable/Thing.edf"), before)
+
+    def test_sync_files_does_not_drag_a_converted_edf_back_in(self):
+        # sync-files rewrites files/ from the install. Without the skip it
+        # would re-add every .edf as a second, verbatim copy of csv/.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, server_root, _m, _s = self._create(
+                tmp, {"DataTable/Thing.edf": self._edf(),
+                      "System/other.ini": b"a=1\r\n"})
+            files, _secrets = rf_repo.sync_files(repo, server_root)
+            self.assertNotIn("DataTable/Thing.edf", files)
+            self.assertIn("System/other.ini", files)
+
+
+if __name__ == "__main__":
+    unittest.main()
