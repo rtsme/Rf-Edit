@@ -19,15 +19,22 @@ targets exactly one.
 Each root mirrors its install's folder structure, so a table that lives in
 Zoneserver\\RF_Bin\\Map\\NeutralA on the server is at
 server/csv/Zoneserver/RF_Bin/Map/NeutralA/<name>.csv in the repo, with its
-schema beside it under server/schemas/. The client root is verbatim-only --
-see docs/knowledge/client-file-formats.md.
+schema beside it under server/schemas/.
+
+The two roots convert different formats. The server root converts .dat through
+rf_dat.py, one CSV per file. The client root converts .edf through rf_edf.py
+(BACKLOG #100) -- an encrypted container holding many tables, so one file
+becomes a *directory* of CSVs, csv/DataTable/Item.edf/00.csv onwards, with the
+layouts and the file's own key under schemas/DataTable/Item.edf/. Everything
+else on either side is copied verbatim into files/ -- see
+docs/knowledge/client-file-formats.md.
 
 Why the CSVs can be trusted as the source of truth: `create` re-imports every
-CSV it writes, rebuilds the .dat, and compares byte-for-byte against the
-original before accepting it. A table only enters the repo if that trip is
-proven lossless for that exact file. What no check can tell you is whether an
-*edit* was correct -- a valid number in the wrong column is still valid -- so
-read `status` before you build.
+CSV it writes, rebuilds the .dat (or the whole .edf, key and all), and
+compares byte-for-byte against the original before accepting it. A file only
+enters the repo if that trip is proven lossless for that exact file. What no
+check can tell you is whether an *edit* was correct -- a valid number in the
+wrong column is still valid -- so read `status` before you build.
 """
 import argparse
 import difflib
@@ -41,6 +48,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import rf_edf
 from rf_dat import (SchemaError, Table, read_schema_json, record_size,
                     write_schema_json)
 
@@ -66,16 +74,34 @@ HASH_WORKERS = 16
 # lose, since rewriting a config file is how you change behaviour by accident.
 VERBATIM_EXTS = (".ini",)
 
-# --- the client root (BACKLOG #9/#10) --------------------------------------
+# --- the client root (BACKLOG #9/#10/#100) ---------------------------------
 #
-# No client file uses the server's container format -- see
-# docs/knowledge/client-file-formats.md. client/csv/ stays empty; every
-# editable client file is copied verbatim instead. The scan is restricted to
+# No client file uses the *server's* container format -- see
+# docs/knowledge/client-file-formats.md -- so nothing here is a .dat table.
+# The client's own converted format is .edf (BACKLOG #100): an encrypted
+# OdinTeam container whose payload is a chain of tables, read by rf_edf.py.
+# Everything else editable is still copied verbatim. The scan is restricted to
 # the directories #9 actually scanned: DataTable/, System/, and the loose
 # files at the client root. Map/, Character/, Chef/, item/, Effect/, Snd/,
 # SpriteImage/, Redist/ are the immutable bulk layer (spec 02 S1) and belong
 # to the asset store (#11) -- walking them here would be slow and wrong.
 CLIENT_SCAN_DIRS = ("DataTable", "System")
+
+# The client's converted format, handled by rf_edf.py rather than rf_dat.py.
+# One .edf holds many tables, so it converts to a *directory* of CSVs named
+# exactly like the file -- csv/DataTable/Item.edf/00.csv .. 46.csv -- with
+# each table's frozen layout beside it under schemas/DataTable/Item.edf/, and
+# EDF_META there too for the two facts no layout carries: which of the four
+# readings was used, and the file's own 256-byte key.
+#
+# The key has to be kept because it is per file and lives *inside* the file:
+# without it a clean clone could rebuild the payload and still not reproduce
+# the .edf, which would make the CSVs a lossy copy rather than the source of
+# truth (spec 02 S5). It is not a secret -- the codec is in rf_edf.py and the
+# key ships in every client -- it is layout data, and it lives with the
+# layouts.
+EDF_EXT = ".edf"
+EDF_META = "edf.json"
 
 # Standard third-party formats -- verdict ASSET in the knowledge file. These
 # belong to the asset store, not rf-data.
@@ -151,12 +177,23 @@ GITATTRIBUTES = """\
 files/** -text
 """
 
-# The client's data under files/ is a mix of EUC-KR/cp949 text, CRLF text and
-# binary blobs -- see docs/knowledge/client-file-formats.md. Unlike the
-# server root, nothing here is known to be uniform ASCII/LF, so every byte is
-# kept exactly as read: no text/eol conversion at all. Scoped to files/ only
-# so the repo's own README/manifest still diff as normal text.
+# The client root's csv/ and schemas/ are written ASCII-only with LF endings,
+# exactly as the server root's are, and must stay that way for the same
+# reason: these tables carry game text in a legacy encoding escaped as \\xNN,
+# and a tool that "fixes" the encoding or the line endings corrupts fields
+# nobody edited.
+#
+# files/ is different and keeps its own rule. The client's verbatim data is a
+# mix of EUC-KR/cp949 text, CRLF text and binary blobs -- see
+# docs/knowledge/client-file-formats.md -- so nothing there is known to be
+# uniform, and every byte is kept exactly as read: no conversion at all. It
+# comes last so it wins over the catch-all above it.
 CLIENT_GITATTRIBUTES = """\
+* text=auto eol=lf
+*.csv text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+
 files/** -text
 """
 
@@ -247,6 +284,66 @@ overwrites into `backups/<timestamp>/` first.
 """
 
 
+# For a root whose converted format is .edf (client): csv/ and schemas/ hold a
+# directory per file rather than a file per table, and there is no .dat pass.
+README_TEMPLATE_EDF = """\
+# %(name)s
+
+The `.edf` tables from an RF Online client, as CSV, so they can be diffed,
+reviewed and edited in a normal editor instead of a hex editor -- plus every
+other editable client file, copied byte for byte.
+
+Install this was created from:
+
+    %(server)s
+
+## Layout
+
+- `csv/` mirrors the client's folder structure. An `.edf` holds many tables,
+  so each one becomes a *directory* named after the file --
+  `csv/DataTable/Item.edf/00.csv`, `01.csv`, ... -- one CSV per table, one
+  line per record, first line the field names. A table whose records nest
+  writes a second CSV beside its own (`00.items.csv`, `00.<run>.csv`) joined
+  by a `Block` column.
+- `schemas/` the same directories again, holding each table's frozen layout
+  (`00.json`) plus `%(edfmeta)s`: how the payload was read, and the file's own
+  256-byte key. Both are needed to rebuild the `.edf` byte for byte with no
+  client present.
+- `files/` byte-for-byte copies of everything not converted.
+- `%(manifest)s` records the install path and a checksum per entry.
+- `build/`, `backups/` generated, git-ignored.
+
+## Editing
+
+**Columns are the binary record layout** -- don't add, remove or reorder them.
+Rows can be added or removed freely; the rebuilt record count follows the
+number of lines. Don't renumber the table CSVs either: a payload is its tables
+laid end to end, so dropping `03.csv` would move every table after it.
+
+- Bytes outside printable ASCII are escaped `\\xNN`, mostly the legacy Korean
+  text. A literal backslash is `\\\\`. Leave these alone unless you mean to
+  change them.
+- `-1` is the usual "empty slot" marker.
+
+Some files describe each other: `NDMap.edf` takes its group lengths from
+`Map.edf`, so a change to one that alters those lengths has to be made in the
+other too, or the pair stops reading.
+
+## Building back
+
+    python rf_repo.py --repo <this folder> status
+    python rf_repo.py --repo <this folder> build --confirm
+
+`status` lists which files would change and which of their tables. `build`
+backs up every file it overwrites into `backups/<timestamp>/` first, and
+refuses to write anything at all if any entry no longer rebuilds.
+
+## Coverage
+
+%(coverage)s
+"""
+
+
 # ---------------------------------------------------------------- scanning
 
 def find_dats(root):
@@ -312,10 +409,17 @@ def find_client_verbatim(root):
 # They stay tracked (a fresh install still needs them, spec 02 §5), but are
 # never compared or overwritten by ordinary status/build -- see
 # compute_state_keys() and build_to_server()'s seed_state.
+#
+# "client" converts .edf instead of .dat (BACKLOG #100): convert=False turns
+# the .dat pass off, convert_edf=True turns the rf_edf.py pass on. The two are
+# separate flags rather than one "format" name because they are separate
+# passes over separate file sets, and a root could one day want both.
 ROOT_PROFILES = {
-    "server": {"convert": True, "find_fn": None, "gitattributes": GITATTRIBUTES,
+    "server": {"convert": True, "convert_edf": False, "find_fn": None,
+              "gitattributes": GITATTRIBUTES,
               "state_patterns": ["Zoneserver/SystemSave/*"]},
-    "client": {"convert": False, "find_fn": find_client_verbatim,
+    "client": {"convert": False, "convert_edf": True,
+              "find_fn": find_client_verbatim,
               "gitattributes": CLIENT_GITATTRIBUTES},
 }
 
@@ -427,10 +531,140 @@ def write_manifest(repo, doc):
         f.write("\n")
 
 
+# -------------------------------------------------------------------- .edf
+
+def edf_dirs(repo, rel):
+    """`(csv dir, schemas dir)` for one .edf, both named exactly like the file.
+
+    Keeping the `.edf` on the directory name is deliberate: the repo mirrors
+    the install's folder structure, and `Item.edf/` can never collide with
+    another entry the way a stripped `Item/` could.
+    """
+    native = rel.replace("/", os.sep)
+    return (os.path.join(repo, "csv", native),
+            os.path.join(repo, "schemas", native))
+
+
+def write_edf_meta(schema_dir, rel, kind, key):
+    """Freeze the two facts about an .edf that no table layout carries."""
+    doc = {"edf": rel, "kind": kind, "key": key.hex()}
+    with open(os.path.join(schema_dir, EDF_META), "w", encoding="ascii",
+              newline="\n") as f:
+        json.dump(doc, f, indent=1, sort_keys=True)
+        f.write("\n")
+
+
+def read_edf_meta(schema_dir):
+    """`(kind, key)` from a schema directory's EDF_META, or raise."""
+    path = os.path.join(schema_dir, EDF_META)
+    try:
+        with open(path, "r", encoding="ascii") as f:
+            doc = json.load(f)
+    except (OSError, ValueError) as e:
+        raise SchemaError("%s: %s" % (path, e))
+    for name in ("kind", "key"):
+        if name not in doc:
+            raise SchemaError("%s: no %s -- an .edf cannot be rebuilt without "
+                              "both the reading and the key" % (path, name))
+    try:
+        key = bytes.fromhex(doc["key"])
+    except ValueError:
+        raise SchemaError("%s: key is not hex" % path)
+    if len(key) != rf_edf.KEY_LENGTH:
+        raise SchemaError("%s: key is %d bytes, must be %d"
+                          % (path, len(key), rf_edf.KEY_LENGTH))
+    return doc["kind"], key
+
+
+def edf_repo_sha(repo, rel, cache=None):
+    """One digest over everything the repo holds for one .edf.
+
+    Every CSV under csv/<rel>/ and every layout under schemas/<rel>/, by name
+    as well as by content, so adding, deleting or renaming a member changes it
+    too. Hashing only the first CSV would miss a deleted `00.items.csv`, and
+    then status would call a file unchanged that no longer rebuilds.
+    """
+    parts = []
+    for label, base in zip(("csv", "schemas"), edf_dirs(repo, rel)):
+        for dirpath, _dirs, names in os.walk(base):
+            for fn in names:
+                path = os.path.join(dirpath, fn)
+                key = os.path.relpath(path, base).replace(os.sep, "/")
+                digest = (cached_sha(path, cache) if cache is not None
+                          else sha(path))
+                parts.append("%s/%s %s" % (label, key, digest))
+    if not parts:
+        raise OSError("no csv/ or schemas/ copy of %s in the repo" % rel)
+    return sha_bytes("\n".join(sorted(parts)).encode("ascii"))
+
+
+def build_edf(repo, rel):
+    """Rebuild one .edf from the repo. Returns (tables, bytes).
+
+    The CSVs give the payload and EDF_META gives the reading and the key, so
+    nothing here needs the install -- which is the whole point: a clean clone
+    plus `build` has to reproduce the client's files exactly (spec 02 S5).
+    """
+    csv_dir, schema_dir = edf_dirs(repo, rel)
+    kind, key = read_edf_meta(schema_dir)
+    tables = rf_edf.import_tables(csv_dir, schema_dir)
+    return tables, rf_edf.encrypt(rf_edf.build_payload(kind, tables), key)
+
+
+def convert_edfs(server_root, repo, rels, progress=None):
+    """Convert each .edf in `rels` into its csv/ and schemas/ directories.
+
+    Returns (entries, skipped). The guarantee is the one `create` makes for a
+    .dat table, and for the same reason: the CSVs are read back through their
+    own frozen layouts, the payload rebuilt, the container re-encrypted with
+    the file's own key, and the result compared byte for byte with the
+    original before the entry is accepted. A file that fails is reported and
+    left out, so it stays a verbatim blob under files/ rather than becoming a
+    lossy CSV nobody can tell is lossy.
+    """
+    entries, skipped = {}, []
+    for i, rel in enumerate(rels):
+        if progress:
+            progress(i, len(rels), rel)
+        key_rel = rel.replace("\\", "/")
+        src = os.path.join(server_root, rel)
+        csv_dir, schema_dir = edf_dirs(repo, key_rel)
+        try:
+            _payload, key, kind, tables = rf_edf.read_tables(src)
+            rf_edf.export_tables(tables, csv_dir, schema_dir,
+                                 os.path.basename(rel))
+            write_edf_meta(schema_dir, key_rel, kind, key)
+            rebuilt = rf_edf.encrypt(
+                rf_edf.build_payload(kind, rf_edf.import_tables(csv_dir,
+                                                                schema_dir)),
+                key)
+        except (SchemaError, ValueError, OSError) as e:
+            shutil.rmtree(csv_dir, ignore_errors=True)
+            shutil.rmtree(schema_dir, ignore_errors=True)
+            skipped.append((rel, str(e).split("\n")[0]))
+            continue
+        with open(src, "rb") as f:
+            original = f.read()
+        if rebuilt != original:
+            shutil.rmtree(csv_dir, ignore_errors=True)
+            shutil.rmtree(schema_dir, ignore_errors=True)
+            skipped.append((rel, "CSV does not rebuild to the original bytes"))
+            continue
+        entries[key_rel] = {
+            "edf_sha": sha_bytes(original),
+            "repo_sha": edf_repo_sha(repo, key_rel),
+            "kind": kind,
+            "tables": len(tables),
+            "records": sum(len(t.rows) for t in tables),
+        }
+    return entries, skipped
+
+
 # ------------------------------------------------------------------ create
 
 def create_repo(server_root, repo, progress=None, include=None, convert=True,
-                find_fn=None, gitattributes=GITATTRIBUTES, profile=None):
+                find_fn=None, gitattributes=GITATTRIBUTES, profile=None,
+                convert_edf=False):
     """Convert every convertible .dat under server_root into repo/csv/.
 
     profile selects a named entry from ROOT_PROFILES ("server" or "client"),
@@ -440,10 +674,13 @@ def create_repo(server_root, repo, progress=None, include=None, convert=True,
     defaults (or work standalone with no profile at all).
 
     convert=False skips the .dat conversion pass entirely (the client root:
-    no file there passes the container test, so there is nothing to attempt --
-    see docs/knowledge/client-file-formats.md). find_fn, if given, replaces
-    find_verbatim() for the verbatim files/ pass (find_client_verbatim for the
-    client root).
+    no file there passes the *server's* container test, so there is nothing to
+    attempt -- see docs/knowledge/client-file-formats.md). convert_edf=True
+    runs the client's own conversion pass instead, through rf_edf.py.
+    find_fn, if given, replaces find_verbatim() for the verbatim files/ pass
+    (find_client_verbatim for the client root); it also decides which files
+    the .edf pass sees, so the two passes always partition one scan and an
+    .edf that fails to convert falls through to files/ rather than vanishing.
 
     Returns (manifest, converted, skipped) where skipped is a list of
     (rel_path, reason) -- tables that could not be represented losslessly and
@@ -453,6 +690,7 @@ def create_repo(server_root, repo, progress=None, include=None, convert=True,
         p = ROOT_PROFILES[profile]
         convert, find_fn, gitattributes = (p["convert"], p["find_fn"],
                                            p["gitattributes"])
+        convert_edf = p.get("convert_edf", False)
     rels = find_dats(server_root) if convert else []
     if include:
         rels = [r for r in rels
@@ -504,17 +742,34 @@ def create_repo(server_root, repo, progress=None, include=None, convert=True,
         }
         del t
 
+    edf = {}
+    if convert_edf:
+        scan = find_fn(server_root) if find_fn else find_verbatim(server_root)
+        edf_rels = [r for r in scan if r.lower().endswith(EDF_EXT)]
+        if progress:
+            progress(0, len(edf_rels), "converting .edf")
+        edf, edf_skipped = convert_edfs(server_root, repo, edf_rels,
+                                        progress=progress)
+        skipped += edf_skipped
+
     if progress:
         progress(total, total, "copying files")
+    # Whatever converted is no longer a verbatim file: it lives in csv/ now,
+    # and keeping a second byte-for-byte copy under files/ would make the
+    # repo carry the same data twice and disagree with itself the moment one
+    # side is edited (spec 02 S5). Whatever did NOT convert is still copied,
+    # which is what makes a failed .edf safe.
     files, secrets = export_files(server_root, repo, progress=progress,
-                                  find_fn=find_fn)
+                                  find_fn=find_fn, skip=set(edf))
 
     manifest = {
         "server_root": os.path.abspath(server_root),
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "convert": convert,
+        "convert_edf": convert_edf,
         "profile": profile,
         "tables": tables,
+        "edf": edf,
         "skipped": {rel.replace("\\", "/"): why for rel, why in skipped},
         "files": files,
         "secrets": secrets,
@@ -535,9 +790,12 @@ def write_repo_meta(repo, server_root, manifest, n_dats=None,
     skipped = manifest.get("skipped", {})
     files = manifest.get("files", {})
     secrets = manifest.get("secrets", {})
+    edf = manifest.get("edf", {})
     convert = manifest.get("convert", True)
+    convert_edf = manifest.get("convert_edf", False)
+    edf_skipped = [k for k in skipped if k.lower().endswith(EDF_EXT)]
     if n_dats is None:
-        n_dats = len(tables) + len(skipped)
+        n_dats = len(tables) + len(skipped) - len(edf_skipped)
     if convert:
         coverage = (
             "%d of %d .dat files under the server root are in this repo. The "
@@ -547,7 +805,25 @@ def write_repo_meta(repo, server_root, manifest, n_dats=None,
             "`files/`. They are not converted -- they are already text -- so "
             "editing one in the repo and building copies exactly those bytes "
             "back to the server."
-            % (len(tables), n_dats, len(skipped), MANIFEST, len(files)))
+            % (len(tables), n_dats, len(skipped) - len(edf_skipped), MANIFEST,
+               len(files)))
+    elif convert_edf:
+        coverage = (
+            "%d of %d .edf files under the install root are converted into "
+            "`csv/` -- %d table(s) in all, %d record(s). Each file becomes a "
+            "directory of CSVs with its frozen layouts under `schemas/`, and "
+            "a scratch `build` reproduces every one of them sha256-identical "
+            "to the client it came from.\n\n"
+            "%d could not be represented losslessly and stay verbatim blobs "
+            "under `files/` instead; see `skipped` in %s for the reason per "
+            "file. Verbatim is a supported end state, not a failure.\n\n"
+            "%d further file(s) are copied verbatim, byte for byte, under "
+            "`files/` -- no codec, or already text. Editing one in the repo "
+            "and building copies exactly those bytes back to the install."
+            % (len(edf), len(edf) + len(edf_skipped),
+               sum(e.get("tables", 0) for e in edf.values()),
+               sum(e.get("records", 0) for e in edf.values()),
+               len(edf_skipped), MANIFEST, len(files)))
     else:
         coverage = (
             "This is a verbatim-only root: no file here passes rf_dat.py's "
@@ -578,13 +854,19 @@ def write_repo_meta(repo, server_root, manifest, n_dats=None,
             "# history. Generated by rf_repo; remove a line to un-ignore.\n")
         for key in sorted(secrets):
             gitignore += "files/%s\n" % key
-    readme_template = README_TEMPLATE if convert else README_TEMPLATE_VERBATIM
+    if convert:
+        readme_template = README_TEMPLATE
+    elif convert_edf:
+        readme_template = README_TEMPLATE_EDF
+    else:
+        readme_template = README_TEMPLATE_VERBATIM
     for name, text in ((".gitignore", gitignore),
                        (".gitattributes", gitattributes),
                        ("README.md", readme_template % {
                            "name": os.path.basename(os.path.abspath(repo)),
                            "server": os.path.abspath(server_root),
                            "manifest": MANIFEST,
+                           "edfmeta": EDF_META,
                            "coverage": coverage})):
         with open(os.path.join(repo, name), "w", encoding="ascii",
                   newline="\n") as f:
@@ -599,6 +881,10 @@ def sync_files(repo, server_root=None, exts=VERBATIM_EXTS, progress=None):
     that haven't changed. Reapplies the same profile (server/client) the repo
     was created with, if any -- so a client repo's sync-files doesn't need to
     be told find_client_verbatim again.
+
+    Entries the repo already converts are skipped, so this never drags an
+    .edf back into files/ as a second, verbatim copy of a file csv/ already
+    holds. Refreshing those means `create`, not `sync-files`.
     """
     manifest = read_manifest(repo)
     server_root = server_root or manifest["server_root"]
@@ -607,7 +893,8 @@ def sync_files(repo, server_root=None, exts=VERBATIM_EXTS, progress=None):
     gitattributes = (ROOT_PROFILES[profile]["gitattributes"] if profile
                      else GITATTRIBUTES)
     files, secrets = export_files(server_root, repo, exts, progress=progress,
-                                  find_fn=find_fn)
+                                  find_fn=find_fn,
+                                  skip=set(manifest.get("edf", {})))
     manifest["files"] = files
     manifest["secrets"] = secrets
     manifest["state"] = compute_state_keys(files, profile)
@@ -617,15 +904,21 @@ def sync_files(repo, server_root=None, exts=VERBATIM_EXTS, progress=None):
 
 
 def export_files(server_root, repo, exts=VERBATIM_EXTS, progress=None,
-                 find_fn=None):
+                 find_fn=None, skip=()):
     """Copy the server's config files into repo/files/ byte-for-byte.
 
     Returns (files, secrets). `secrets` maps a repo-relative path to the
     credential keys found in it; those paths are also written into .gitignore
     so they stay in the working tree -- editable, and buildable back to the
     server -- without ever entering git history.
+
+    `skip` names entries this root converts instead (the client's .edf files,
+    BACKLOG #100), by the same forward-slash key the manifest uses. They are
+    not verbatim files and must not be copied a second time.
     """
     rels = find_fn(server_root) if find_fn else find_verbatim(server_root, exts)
+    if skip:
+        rels = [r for r in rels if r.replace("\\", "/") not in skip]
     files, secrets = {}, {}
     for i, rel in enumerate(rels):
         if progress:
@@ -656,7 +949,9 @@ class Status(object):
     # ServerState.ini) -- there is simply nothing to write for this one.
     NOREPO = "no_repo"
 
-    TABLE, FILE = "table", "file"
+    # A converted .dat, a verbatim copy, or a converted .edf -- three
+    # different things to rebuild and three different diffs to show.
+    TABLE, FILE, EDF = "table", "file", "edf"
 
     def __init__(self, rel, state, detail="", changed_records=None,
                  kind=TABLE):
@@ -748,7 +1043,128 @@ def diff_repo(repo, server_root=None, progress=None):
             out.append(Status(rel, Status.CHANGED, detail, idx))
         del t
 
+    out.extend(diff_edf(repo, server_root, manifest, cache, progress=progress))
+    # Again: the .edf pass hashes a few hundred more files into the same cache.
+    write_stat_cache(repo, cache)
     out.extend(diff_files(repo, server_root, manifest))
+    return out
+
+
+# Regions a table may carry beside its rows: a block or pool table's items, a
+# nested table's runs, a group table's lengths. They are part of the record
+# data and a diff that ignored them would call a real edit "same".
+EDF_REGIONS = ("items", "runs", "groups")
+
+
+def edf_delta(live_tables, repo_tables):
+    """Where two readings of one .edf differ. [(table index or None, detail)]."""
+    if len(live_tables) != len(repo_tables):
+        return [(None, "table count %d -> %d"
+                 % (len(live_tables), len(repo_tables)))]
+    out = []
+    for i, (live, mine) in enumerate(zip(live_tables, repo_tables)):
+        if len(live.rows) != len(mine.rows):
+            out.append((i, "record count %d -> %d"
+                        % (len(live.rows), len(mine.rows))))
+            continue
+        n = sum(1 for a, b in zip(live.rows, mine.rows) if a != b)
+        moved = [name for name in EDF_REGIONS
+                 if getattr(live, name, None) != getattr(mine, name, None)]
+        if not n and not moved:
+            continue
+        detail = "%d record(s) changed" % n if n else ""
+        if moved:
+            detail += ("%s%s differ" % (", " if detail else "",
+                                        " and ".join(moved)))
+        out.append((i, detail))
+    return out
+
+
+def edf_changes(repo, rel, server_root, tables=None, blob=None, limit=8):
+    """Per-table detail for one changed .edf, for status and the GUI.
+
+    Reads the install's own copy back through the same layers `create` used,
+    so the answer is in records rather than in byte offsets. If the install's
+    copy no longer reads at all -- someone edited it by hand, or an earlier
+    build wrote a corrupt one -- that is said plainly instead of guessed at.
+
+    `tables`/`blob` let a caller that has already rebuilt the file hand the
+    result over; Item.edf is 15 MB and rebuilding it twice to print one line
+    is not free.
+    """
+    live_path = os.path.join(server_root, rel.replace("/", os.sep))
+    if tables is None or blob is None:
+        tables, blob = build_edf(repo, rel)
+    with open(live_path, "rb") as f:
+        live = f.read()
+    try:
+        _p, _k, _kind, live_tables = rf_edf.read_tables(live_path)
+    except (SchemaError, ValueError, OSError) as e:
+        return None, ("%d -> %d bytes; the install's own copy does not read "
+                      "back (%s)" % (len(live), len(blob),
+                                     str(e).split("\n")[0]))
+    deltas = edf_delta(live_tables, tables)
+    if not deltas:
+        return deltas, ("%d -> %d bytes, but every table reads the same -- "
+                        "the container framing differs"
+                        % (len(live), len(blob)))
+    shown = "; ".join("table %s: %s" % ("?" if i is None else i, why)
+                      for i, why in deltas[:limit])
+    if len(deltas) > limit:
+        shown += "; +%d more" % (len(deltas) - limit)
+    return deltas, shown
+
+
+def diff_edf(repo, server_root, manifest, cache, progress=None):
+    """Compare every .edf the repo converts against the install. [Status].
+
+    Same fast path the tables get: when the repo side and the install side
+    both still hash to what the manifest recorded, nothing is parsed. When
+    either moved, the CSVs are rebuilt into a whole .edf and diffed against
+    the install byte for byte -- the CSVs are the source of truth, and the
+    only thing that can prove them is rebuilding what they claim to describe.
+
+    An entry that will not rebuild is ERROR, which blocks `build` for the
+    whole root: a grammar that stopped fitting or a stamped directory that
+    contradicts itself must never reach the install as a half-written file.
+    """
+    out = []
+    rels = sorted(manifest.get("edf", {}))
+    for i, rel in enumerate(rels):
+        if progress:
+            progress(i, len(rels), rel)
+        entry = manifest["edf"][rel]
+        live_path = os.path.join(server_root, rel.replace("/", os.sep))
+        try:
+            repo_sha = edf_repo_sha(repo, rel, cache)
+        except OSError as e:
+            out.append(Status(rel, Status.ERROR, str(e), kind=Status.EDF))
+            continue
+        try:
+            live_sha = cached_sha(live_path, cache)
+        except OSError:
+            out.append(Status(rel, Status.GONE, "not on the install",
+                              kind=Status.EDF))
+            continue
+        if (repo_sha == entry.get("repo_sha")
+                and live_sha == entry.get("edf_sha")):
+            out.append(Status(rel, Status.SAME, kind=Status.EDF))
+            continue
+        try:
+            _tables, blob = build_edf(repo, rel)
+        except (SchemaError, ValueError, OSError) as e:
+            out.append(Status(rel, Status.ERROR, str(e).split("\n")[0],
+                              kind=Status.EDF))
+            continue
+        if sha_bytes(blob) == live_sha:
+            out.append(Status(rel, Status.SAME, kind=Status.EDF))
+            continue
+        try:
+            _deltas, detail = edf_changes(repo, rel, server_root,
+                                          tables=_tables, blob=blob)
+        except (SchemaError, ValueError, OSError) as e:
+            detail = str(e).split("\n")[0]
+        out.append(Status(rel, Status.CHANGED, detail, kind=Status.EDF))
     return out
 
 
@@ -935,6 +1351,15 @@ def build_to_server(repo, server_root=None, only=None, apply=False,
                 f.write(blob)
             manifest["files"][s.rel]["sha"] = sha_bytes(blob)
             manifest["files"][s.rel]["bytes"] = len(blob)
+        elif s.kind == Status.EDF:
+            # Rebuilt from the CSVs and re-encrypted with the file's own key.
+            # Anything that would not rebuild was already an ERROR above, so
+            # nothing half-written can reach the install from here.
+            _tables, blob = build_edf(repo, s.rel)
+            with open(live_path, "wb") as f:
+                f.write(blob)
+            manifest["edf"][s.rel]["edf_sha"] = sha_bytes(blob)
+            manifest["edf"][s.rel]["repo_sha"] = edf_repo_sha(repo, s.rel)
         else:
             _t, blob = build_table(repo, native)
             with open(live_path, "wb") as f:
@@ -992,8 +1417,13 @@ def cmd_create(args):
     profile = args.root if args.root in ROOT_PROFILES else None
     manifest, tables, skipped = create_repo(args.server, target,
                                             progress=_bar, profile=profile)
+    edf = manifest.get("edf", {})
     print("\n\ncreated %s" % os.path.abspath(target))
     print("  %d table(s) converted" % len(tables))
+    if edf:
+        print("  %d .edf converted -- %d table(s), %d record(s)"
+              % (len(edf), sum(e["tables"] for e in edf.values()),
+                 sum(e["records"] for e in edf.values())))
     print("  %d skipped" % len(skipped))
     reasons = {}
     for rel, why in skipped:

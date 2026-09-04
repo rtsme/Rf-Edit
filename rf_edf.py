@@ -2957,45 +2957,209 @@ def read_stamp_json(path):
     return schema, doc
 
 
+# --------------------------------------------------------------------------
+# the repo-facing layer: a file's tables as a directory of CSVs
+# --------------------------------------------------------------------------
+#
+# BACKLOG #100 wires this into rf_repo.py's client root, so what
+# `--check-tables` proves in a temp directory is exactly what rf-data keeps on
+# disk: one directory per `.edf`, `00.csv` .. `NN.csv` inside it, and each
+# table's frozen layout beside it as `NN.json`. The reading and the builder
+# are paired here rather than sniffed at the call site -- a chain table and a
+# .dat table are both `rf_dat.Table` and differ only in the header they are
+# written back with, so which reading was used has to be recorded, not guessed
+# a second time.
+
+PAYLOAD_BUILDERS = {
+    "chain": build_table_chain,
+    "grammar": build_var_tables,
+    "dat": build_dat_tables,
+    "stamped": build_stamped_tables,
+}
+
+# Which table class a frozen grammar's `kind` belongs to. read_grammar_json
+# rebuilds the grammar itself; this says who reads a CSV with it.
+GRAMMAR_TABLES = {
+    "flat": VarTable,
+    "block": BlockTable,
+    "pool": PoolTable,
+    "chain": ChainTable,
+    "nest": NestTable,
+    "group": GroupTable,
+}
+GRAMMAR_TABLE_CLASSES = (VarTable, BlockTable, PoolTable, ChainTable,
+                         NestTable, GroupTable)
+
+_LAYOUT_NAME = re.compile(r"^(\d+)\.json$")
+
+
+class EdfUnhandled(EdfError):
+    """The container opens, but its payload matches none of the four readings.
+
+    Distinct from an ordinary EdfError on purpose: a file nobody has read yet
+    is not a broken file. `--check-tables` reports it as unhandled, and
+    rf_repo.py leaves it in files/ as a verbatim blob rather than refusing to
+    import the whole install over it.
+    """
+
+
+def classify_tables(payload, source="EDF payload", companion=None):
+    """`(kind, tables)` for a decoded payload -- the four readings, in order.
+
+    A registered grammar is tried alone and its failure is fatal: something is
+    wrong with the grammar or with the file, and either way a file whose
+    layout we claim to know must not fall through to a guess. Without one the
+    chain walk goes first, then the server's plain .dat container, then the
+    stamped directory. A payload that *is* stamped but whose two halves
+    contradict each other raises StampedDirectoryError rather than being
+    reported as unread.
+
+    `companion` is `companion_reader(path)` -- only a group grammar needs it,
+    and only for reading; no builder ever does.
+    """
+    name = os.path.basename(source)
+    grammar = grammar_for(name)
+    if grammar is not None:
+        try:
+            return "grammar", parse_var_tables(payload, grammar, name,
+                                               companion=companion)
+        except SchemaError as exc:
+            raise EdfError("its grammar does not fit: %s"
+                           % str(exc).split(": ", 1)[-1])
+    try:
+        return "chain", parse_table_chain(payload, name)
+    except SchemaError as exc:
+        chain_why = str(exc).split(": ", 1)[-1]
+    try:
+        return "dat", parse_dat_tables(payload, name)
+    except SchemaError:
+        pass
+    try:
+        return "stamped", parse_stamped_tables(payload, name)
+    except StampedDirectoryError:
+        raise
+    except (SchemaError, EdfError):
+        # Reported against the chain reading: it is the one that gets furthest
+        # into these payloads, so its message says the most about where the
+        # walk broke.
+        raise EdfUnhandled("not a table chain: %s" % chain_why)
+
+
+def read_tables(path, companion=True):
+    """`(payload, key, kind, tables)` for the `.edf` file at `path`.
+
+    The key comes back decoded, ready to hand to `encrypt`. It is per file and
+    travels inside it, so a repo that wants to rebuild the file byte for byte
+    later -- with the install no longer there to read it back off -- has to
+    keep its own copy.
+    """
+    payload, key = decrypt_file(path)
+    kind, tables = classify_tables(
+        payload, path, companion=companion_reader(path) if companion else None)
+    return payload, key, kind, tables
+
+
+def build_payload(kind, tables):
+    """Rebuild a payload from tables that were read as `kind`."""
+    if kind not in PAYLOAD_BUILDERS:
+        raise EdfError("%r is not a payload reading -- it is one of %s"
+                       % (kind, ", ".join(sorted(PAYLOAD_BUILDERS))))
+    return PAYLOAD_BUILDERS[kind](tables)
+
+
+def export_tables(tables, csv_dir, schema_dir, name=""):
+    """Write each table as `NN.csv`, with its frozen layout as `NN.json`.
+
+    A block, pool or nested table writes its second region as a further CSV
+    beside its own -- `00.items.csv`, `00.<run>.csv` -- named by the table
+    class, not here. The layout JSON is what `import_tables` reads the class
+    back off: a stamp doc carries `stamp_index`, a grammar doc `kind`, and a
+    plain schema doc neither.
+    """
+    os.makedirs(csv_dir, exist_ok=True)
+    os.makedirs(schema_dir, exist_ok=True)
+    for i, table in enumerate(tables):
+        csv_path = os.path.join(csv_dir, "%02d.csv" % i)
+        layout_path = os.path.join(schema_dir, "%02d.json" % i)
+        table.export_csv(csv_path)
+        where = "%s#%d" % (name, i)
+        if isinstance(table, StampTable):
+            write_stamp_json(table, layout_path, table_name=where,
+                             source=table.schema_source)
+        elif isinstance(table, GRAMMAR_TABLE_CLASSES):
+            write_grammar_json(table.grammar, layout_path, table_name=where,
+                               source=table.grammar_source)
+        else:
+            write_schema_json(table.schema, layout_path, dat_name=where,
+                              source=table.schema_source,
+                              header_field_count=table.field_count)
+
+
+def table_indices(schema_dir):
+    """`[0, 1, ... n-1]` from a schema directory's `NN.json` layouts.
+
+    A gap means a layout was deleted or renamed, and every table after it
+    would silently move: a payload is its tables laid end to end, so table 3
+    becoming table 2 rewrites the file from there on. Refuse instead.
+    """
+    try:
+        names = os.listdir(schema_dir)
+    except OSError:
+        raise EdfError("%s: no frozen layouts here -- nothing to rebuild from"
+                       % schema_dir)
+    idx = sorted(int(m.group(1))
+                 for m in (_LAYOUT_NAME.match(n) for n in names) if m)
+    if not idx:
+        raise EdfError("%s: no NN.json layout here -- nothing to rebuild from"
+                       % schema_dir)
+    if idx != list(range(len(idx))):
+        raise EdfError(
+            "%s: the layouts are numbered %s -- they must run from 00 upwards "
+            "with no gaps, because a payload is its tables laid end to end and "
+            "dropping one moves every table after it"
+            % (schema_dir, ", ".join("%02d" % i for i in idx)))
+    return idx
+
+
+def import_tables(csv_dir, schema_dir):
+    """Read a pair of directories written by `export_tables` back into tables."""
+    out = []
+    for i in table_indices(schema_dir):
+        layout_path = os.path.join(schema_dir, "%02d.json" % i)
+        csv_path = os.path.join(csv_dir, "%02d.csv" % i)
+        with open(layout_path, "r", encoding="ascii") as f:
+            doc = json.load(f)
+        if "stamp_index" in doc:
+            schema, doc = read_stamp_json(layout_path)
+            out.append(StampTable.from_csv(
+                csv_path, schema, doc["stamp_index"], doc["stamp_headed"],
+                field_count=doc.get("header_field_count")))
+        elif "kind" in doc:
+            grammar, doc = read_grammar_json(layout_path)
+            if doc["kind"] not in GRAMMAR_TABLES:
+                raise EdfError("%s: %r is not a grammar kind -- it is one of %s"
+                               % (layout_path, doc["kind"],
+                                  ", ".join(sorted(GRAMMAR_TABLES))))
+            out.append(GRAMMAR_TABLES[doc["kind"]].from_csv(csv_path, grammar))
+        else:
+            schema, doc = read_schema_json(layout_path)
+            out.append(Table.from_csv(
+                csv_path, schema, field_count=doc.get("header_field_count")))
+    return out
+
+
 def _csv_round_trip(tables, name, tmp, build):
     """Write every table out as CSV + frozen layout, read it back, rebuild.
 
-    All four payload models come through here, and each one freezes the
-    layout its own reader needs -- a schema for a chain or .dat table, a
-    grammar for a variable-record one. `build` is the matching payload
-    builder, passed in rather than sniffed: a chain table and a .dat table are
-    both `rf_dat.Table`s and differ only in the header they are written back
-    with, so the caller has to say which one it read.
+    All four payload models come through here, and each one freezes the layout
+    its own reader needs -- a schema for a chain or .dat table, a grammar for a
+    variable-record one. `build` is the matching payload builder, passed in
+    rather than sniffed: a chain table and a .dat table are both
+    `rf_dat.Table` and differ only in the header they are written back with,
+    so the caller has to say which one it read.
     """
-    rebuilt = []
-    for i, table in enumerate(tables):
-        csv_path = os.path.join(tmp, "%02d.csv" % i)
-        layout_path = os.path.join(tmp, "%02d.json" % i)
-        table.export_csv(csv_path)
-        if isinstance(table, StampTable):
-            write_stamp_json(table, layout_path,
-                             table_name="%s#%d" % (name, i),
-                             source=table.schema_source)
-            schema, doc = read_stamp_json(layout_path)
-            rebuilt.append(StampTable.from_csv(
-                csv_path, schema, doc["stamp_index"], doc["stamp_headed"],
-                field_count=doc.get("header_field_count")))
-        elif isinstance(table, (VarTable, BlockTable, PoolTable, ChainTable,
-                              NestTable, GroupTable)):
-            write_grammar_json(table.grammar, layout_path,
-                               table_name="%s#%d" % (name, i),
-                               source=table.grammar_source)
-            grammar, _doc = read_grammar_json(layout_path)
-            rebuilt.append(type(table).from_csv(csv_path, grammar))
-        else:
-            write_schema_json(table.schema, layout_path,
-                              dat_name="%s#%d" % (name, i),
-                              source=table.schema_source,
-                              header_field_count=table.field_count)
-            schema, doc = read_schema_json(layout_path)
-            rebuilt.append(Table.from_csv(
-                csv_path, schema, field_count=doc.get("header_field_count")))
-    return build(rebuilt)
+    export_tables(tables, tmp, tmp, name)
+    return build(import_tables(tmp, tmp))
 
 
 def _check_tables(paths):
@@ -3017,55 +3181,21 @@ def _check_tables(paths):
             print("ERROR  %-28s %s" % (name, exc))
             failed += 1
             continue
-        grammar = grammar_for(name)
         try:
-            if grammar is not None:
-                kind, tables, build = (
-                    "grammar",
-                    parse_var_tables(payload, grammar, name,
-                                     companion=companion_reader(path)),
-                    build_var_tables)
-            else:
-                kind, tables, build = ("chain",
-                                       parse_table_chain(payload, name),
-                                       build_table_chain)
+            kind, tables = classify_tables(payload, path,
+                                           companion=companion_reader(path))
+        except EdfUnhandled as exc:
+            print("SKIP   %-28s %s" % (name, exc))
+            skipped += 1
+            continue
         except SchemaError as exc:
-            if grammar is not None:
-                # A registered grammar that no longer fits is a failure, not a
-                # skip: something is wrong with the grammar or with the file,
-                # and either way it must not pass quietly.
-                print("FAIL   %-28s its grammar does not fit: %s"
-                      % (name, str(exc).split(": ", 1)[-1]))
-                failed += 1
-                continue
-            chain_why = str(exc)
-            try:
-                kind, tables, build = ("dat",
-                                       parse_dat_tables(payload, name),
-                                       build_dat_tables)
-            except SchemaError:
-                try:
-                    kind, tables, build = ("stamped",
-                                           parse_stamped_tables(payload, name),
-                                           build_stamped_tables)
-                except StampedDirectoryError as exc:
-                    # It *is* a stamped payload; its two halves contradict
-                    # each other. That is a failure, not an unread file.
-                    print("FAIL   %-28s %s"
-                          % (name, str(exc).split(": ", 1)[-1]))
-                    failed += 1
-                    continue
-                except (SchemaError, EdfError):
-                    # Reported against the chain reading: it is the one that
-                    # gets furthest into these payloads, so its message says
-                    # the most about where the walk broke.
-                    print("SKIP   %-28s not a table chain: %s"
-                          % (name, chain_why.split(": ", 1)[-1]))
-                    skipped += 1
-                    continue
+            print("FAIL   %-28s %s" % (name, str(exc).split(": ", 1)[-1]))
+            failed += 1
+            continue
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                blob = _csv_round_trip(tables, name, tmp, build)
+                blob = _csv_round_trip(tables, name, tmp,
+                                       PAYLOAD_BUILDERS[kind])
         except (SchemaError, ValueError, OSError) as exc:
             print("FAIL   %-28s %s" % (name, exc))
             failed += 1
