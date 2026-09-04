@@ -518,5 +518,120 @@ class EdfRootTests(unittest.TestCase):
             self.assertIn("System/other.ini", files)
 
 
+class ClientVerbatimExclusionTests(unittest.TestCase):
+    """BACKLOG #110: a fresh `create --root client` used to commit
+    assets.secrets.json (find_secrets doesn't flag it -- its keys aren't
+    credential-shaped) and would silently drop hud-panels.log.* the moment
+    that pattern's timestamp changed (CLIENT_EXCLUDE_PATHS only matches
+    exact paths). Every fixture here is synthetic (rule 12).
+    """
+
+    def test_example_twin_is_excluded(self):
+        # The rule-12 shape: a tracked <name>.example beside an untracked
+        # real file. Content is irrelevant -- the sibling's existence alone
+        # is the signal, which is why this catches a file find_secrets can't
+        # (its keys aren't credential-shaped).
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(os.path.join(tmp, "assets.secrets.json"),
+                   b'{"synthetic": "not-a-real-key-shape"}')
+            _write(os.path.join(tmp, "assets.secrets.json.example"),
+                   b'{"synthetic": "placeholder"}')
+            kept = rf_repo.find_client_verbatim(tmp)
+            self.assertNotIn("assets.secrets.json", kept)
+            # The template itself has no .example twin of its own and stays.
+            self.assertIn("assets.secrets.json.example", kept)
+
+    def test_file_without_an_example_twin_is_kept(self):
+        # The twin rule must not over-trigger on ordinary tracked config.
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(os.path.join(tmp, "assets.json"), b'{"a": 1}')
+            self.assertIn("assets.json", rf_repo.find_client_verbatim(tmp))
+
+    def test_secret_filter_alone_misses_the_twin_case(self):
+        # Documents *why* the twin rule exists: this is not a credential
+        # find_secrets would ever flag on its own.
+        blob = b'{"synthetic": "not-a-real-key-shape"}'
+        self.assertEqual(rf_repo.find_secrets(blob), [])
+
+    def test_hud_panels_log_glob_is_excluded(self):
+        # CLIENT_EXCLUDE_PATHS is matched by `in`, exact-path only -- the
+        # timestamp in the real filename means no exact entry ever matches.
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(os.path.join(tmp, "hud-panels.log.20260901-150630"), b"")
+            _write(os.path.join(tmp, "hud-panels.ini"), b"[a]\r\nb=1\r\n")
+            kept = rf_repo.find_client_verbatim(tmp)
+            self.assertNotIn("hud-panels.log.20260901-150630", kept)
+            self.assertIn("hud-panels.ini", kept)
+
+    def test_exclusions_are_reported_not_silent(self):
+        # BACKLOG #109 and #110 were both found because a fresh create
+        # dropped files with no report at all; find_client_excluded is what
+        # cmd_create/cmd_sync_files now print instead of staying quiet.
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(os.path.join(tmp, "assets.secrets.json"), b"{}")
+            _write(os.path.join(tmp, "assets.secrets.json.example"), b"{}")
+            _write(os.path.join(tmp, "hud-panels.log.20260901-150630"), b"")
+            excluded = dict(rf_repo.find_client_excluded(tmp))
+            self.assertEqual(excluded["assets.secrets.json"],
+                             "credential (tracked .example twin)")
+            self.assertEqual(excluded["hud-panels.log.20260901-150630"],
+                             "runtime output")
+
+    def test_asset_and_binary_exclusions_are_not_reported(self):
+        # Those are the expected bulk of a real scan (thousands of .dds/
+        # .tga files); reporting them would bury the two cases worth seeing.
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(os.path.join(tmp, "System", "font.ttf"), b"")
+            self.assertNotIn(
+                "System/font.ttf",
+                [rel for rel, _why in rf_repo.find_client_excluded(tmp)])
+            self.assertNotIn("System/font.ttf",
+                             rf_repo.find_client_verbatim(tmp))
+
+    def test_export_files_never_copies_the_excluded_pair(self):
+        # End to end, the way SecretFilterTests proves find_secrets: nothing
+        # excluded reaches files/ at all -- not gitignored-but-present like a
+        # credential find_secrets catches, actually absent (done-when: not
+        # in `files`, not on disk).
+        with tempfile.TemporaryDirectory() as tmp:
+            server_root = os.path.join(tmp, "server")
+            repo = os.path.join(tmp, "repo")
+            _write(os.path.join(server_root, "assets.secrets.json"), b"{}")
+            _write(os.path.join(server_root, "assets.secrets.json.example"),
+                   b"{}")
+            _write(os.path.join(server_root,
+                                "hud-panels.log.20260901-150630"), b"")
+            _write(os.path.join(server_root, "assets.json"), b'{"a": 1}')
+            files, _secrets = rf_repo.export_files(
+                server_root, repo, find_fn=rf_repo.find_client_verbatim)
+            self.assertNotIn("assets.secrets.json", files)
+            self.assertNotIn("hud-panels.log.20260901-150630", files)
+            self.assertIn("assets.json", files)
+            self.assertFalse(os.path.exists(
+                os.path.join(repo, "files", "assets.secrets.json")))
+            self.assertFalse(os.path.exists(os.path.join(
+                repo, "files", "hud-panels.log.20260901-150630")))
+
+    def test_removing_the_twin_guard_would_leak_it(self):
+        # Mutation check (done-when: "fails if its guard is removed"):
+        # without the .example-twin lookup, keep() only had extension and
+        # exact-path rules, and assets.secrets.json matches neither.
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(os.path.join(tmp, "assets.secrets.json"), b"{}")
+            _write(os.path.join(tmp, "assets.secrets.json.example"), b"{}")
+            with unittest.mock.patch.object(
+                    rf_repo, "CLIENT_EXAMPLE_TWIN_SUFFIX", ".not-example"):
+                self.assertIn("assets.secrets.json",
+                              rf_repo.find_client_verbatim(tmp))
+
+    def test_removing_the_glob_guard_would_leak_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(os.path.join(tmp, "hud-panels.log.20260901-150630"), b"")
+            with unittest.mock.patch.object(
+                    rf_repo, "CLIENT_EXCLUDE_GLOBS", ()):
+                self.assertIn("hud-panels.log.20260901-150630",
+                              rf_repo.find_client_verbatim(tmp))
+
+
 if __name__ == "__main__":
     unittest.main()
