@@ -14,9 +14,12 @@ is what verify_schema() does, and it's the reason a wrong schema fails loudly
 instead of silently shredding a file on write-back.
 
 Schemas come from the GU 2019 parser's pre-extracted .txt exports (a type row
-plus a field-name row -- see schema_from_txt), or are auto-derived for the
-uniform _str files (see auto_schema). Type sizes come from that parser's own
-include.php type table, reproduced in TYPES below.
+plus a field-name row -- see schema_from_txt), are auto-derived for the
+uniform _str files (see auto_schema), are reused from an existing rf-data
+repo's frozen schema when the parser export isn't reachable (see
+find_repo_schema), or are inferred from the raw records as a last resort.
+Type sizes come from that parser's own include.php type table, reproduced in
+TYPES below.
 
 Types this build's files actually use are decoded to numbers and strings.
 Anything else (the parser's composite pseudo-types like store/stb/spcode) is
@@ -53,6 +56,18 @@ HEADER_SIZE = 12
 PARSER_DIR = os.environ.get(
     "RF_PARSER_DIR",
     r"C:\Users\Me\Downloads\Parser_GU_Clean_English_Fixed_2019\gu_in",
+)
+
+# An existing rf-data repo's frozen schemas, reused when the parser export
+# above isn't reachable (BACKLOG #26) -- a schema an earlier `create` already
+# proved round-trips is strictly better evidence than guessing from the
+# bytes. Defaults to the sibling rf-data checkout this repo is normally
+# cloned next to (see the umbrella's repos.json); override with
+# RF_REPO_SCHEMA_DIR if that layout doesn't hold.
+REPO_SCHEMA_DIR = os.environ.get(
+    "RF_REPO_SCHEMA_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 os.pardir, "rf-data", "server", "schemas"),
 )
 
 # type name -> (size in bytes, struct code or None for "raw hex blob")
@@ -311,6 +326,25 @@ def find_txt_schema(dat_name, parser_dir=PARSER_DIR):
     if not os.path.isdir(parser_dir):
         return None
     for root, _dirs, files in os.walk(parser_dir):
+        for fn in files:
+            if fn.lower() == want:
+                return os.path.join(root, fn)
+    return None
+
+
+def find_repo_schema(dat_name, schema_dir=REPO_SCHEMA_DIR):
+    """Locate an existing rf-data repo's frozen schema for a .dat, if any.
+
+    Matched by basename against every .json under schema_dir, the same way
+    find_txt_schema matches the parser's .txt exports -- a table name never
+    repeats across the tree (per-map tables are already prefixed with their
+    map name), so this is enough to find the right file without knowing this
+    .dat's path relative to whatever server root it came from.
+    """
+    want = os.path.splitext(os.path.basename(dat_name))[0].lower() + ".json"
+    if not os.path.isdir(schema_dir):
+        return None
+    for root, _dirs, files in os.walk(schema_dir):
         for fn in files:
             if fn.lower() == want:
                 return os.path.join(root, fn)
@@ -586,7 +620,8 @@ class Table(object):
         return struct.unpack(HEADER_FMT, head)
 
     @classmethod
-    def open(cls, path, schema=None, parser_dir=PARSER_DIR):
+    def open(cls, path, schema=None, parser_dir=PARSER_DIR,
+             repo_schema_dir=REPO_SCHEMA_DIR):
         """Read a .dat, finding a schema automatically when one isn't given."""
         with open(path, "rb") as f:
             data = f.read()
@@ -616,6 +651,20 @@ class Table(object):
                 auto = auto_schema(field_count, rec_size)
                 if auto is not None:
                     schema, schema_source = auto, "auto-derived (_str shape)"
+            if schema is None or record_size(schema) != rec_size:
+                # A schema an existing rf-data repo already proved correct
+                # for this table (matching record_size -- the authoritative
+                # number per verify_schema) beats guessing from the bytes.
+                # Covers a missing/moved parser_dir (BACKLOG #26) without
+                # relying on HAND_SCHEMAS, which is reserved for tables the
+                # parser never covered at all.
+                repo_json = find_repo_schema(path, repo_schema_dir)
+                if repo_json:
+                    candidate, _doc = read_schema_json(repo_json)
+                    if record_size(candidate) == rec_size:
+                        schema = candidate
+                        schema_source = "%s (repo schema)" % os.path.basename(repo_json)
+                        strict = len(candidate) == field_count
             if schema is None or record_size(schema) != rec_size:
                 # Last resort: read the layout off the records themselves.
                 # Used by the per-map tables, which no reference covers.
