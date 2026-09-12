@@ -209,6 +209,56 @@ class StateFilesTests(unittest.TestCase):
                 os.path.join(server_root, "SystemSave", "Boss1_Boss.ini")))
 
 
+class ClientStateProfileTests(unittest.TestCase):
+    """BACKLOG #164: the client root gets the same manifest["state"]
+    treatment the server root already had (BACKLOG #85) for its own
+    confirmed runtime-state files -- Launcher.ini (near-miss: reverted a
+    locally-configured LoginIP/WorldIP) and DataTable/clientdb.dat (live
+    combat/movement settings). Driven by
+    ROOT_PROFILES["client"]["state_patterns"] via compute_state_keys(), not
+    a hand-supplied state= list like StateFilesTests above -- this proves
+    the profile wiring itself, not just the generic mechanism.
+    """
+
+    def test_client_profile_marks_known_state_files(self):
+        files = {"Launcher.ini": {}, "DataTable/clientdb.dat": {},
+                 "R3Engine.ini": {}, "DataTable/GameSetting.ini": {},
+                 "Launchervps.ini": {}, "System/staff.txt": {}}
+        state = rf_repo.compute_state_keys(files, "client")
+        self.assertIn("Launcher.ini", state)
+        self.assertIn("DataTable/clientdb.dat", state)
+        self.assertIn("R3Engine.ini", state)
+        self.assertIn("DataTable/GameSetting.ini", state)
+        # Launchervps.ini is a hand-maintained swap-in template, not
+        # something a running install rewrites -- deliberately excluded.
+        self.assertNotIn("Launchervps.ini", state)
+        self.assertNotIn("System/staff.txt", state)
+
+    def test_build_confirm_leaves_locally_modified_launcher_ini_untouched(self):
+        client_state = rf_repo.compute_state_keys(
+            {"Launcher.ini": {}, "DataTable/clientdb.dat": {}}, "client")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, client_root = _make_repo(
+                tmp, {"Launcher.ini": b"LoginIP=127.0.0.1\n",
+                      "DataTable/clientdb.dat": b"[0AOPEH]\nMoveMode=1\n"},
+                state=client_state)
+            # The live install is locally configured differently -- a real
+            # VPS LoginIP, and live combat-mode settings -- exactly the
+            # near-miss this task exists because of.
+            _write(os.path.join(client_root, "Launcher.ini"),
+                  b"LoginIP=169.58.73.166\n")
+            _write(os.path.join(client_root, "DataTable", "clientdb.dat"),
+                  b"[0AOPEH]\nMoveMode=2\n")
+            pending, backup = build_to_server(repo, client_root, apply=True,
+                                              allow_create=True)
+            self.assertEqual(pending, [])
+            with open(os.path.join(client_root, "Launcher.ini"), "rb") as f:
+                self.assertEqual(f.read(), b"LoginIP=169.58.73.166\n")
+            with open(os.path.join(client_root, "DataTable", "clientdb.dat"),
+                     "rb") as f:
+                self.assertEqual(f.read(), b"[0AOPEH]\nMoveMode=2\n")
+
+
 if __name__ == "__main__":
     unittest.main()
 

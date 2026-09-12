@@ -495,6 +495,24 @@ def find_client_excluded(root):
 # never compared or overwritten by ordinary status/build -- see
 # compute_state_keys() and build_to_server()'s seed_state.
 #
+# "client" gets the same treatment (BACKLOG #164): a client `build --confirm`
+# silently overwrote `Launcher.ini` (reverted a locally-configured
+# LoginIP/WorldIP back to rf-data's tracked default) and
+# `DataTable/clientdb.dat` (live combat/movement settings plus a per-account
+# saved-settings section) against James's real install. Both are confirmed
+# live/per-machine state, not authored content -- the tracked copy of
+# `R3Engine.ini` and `DataTable/GameSetting.ini` already show the same
+# problem happening silently (a literal GPU adapter string and saved chat
+# window pixel coordinates baked into what should be shipped default
+# config), so those two join the list pre-emptively rather than after their
+# own incident. Candidates considered and deliberately left OUT, because
+# nothing established they are rewritten by a running install rather than
+# hand-maintained content: `Launchervps.ini` (a manually-swapped alternate
+# Launcher.ini, per its own header comment -- the launcher never reads it
+# while Launcher.ini exists), `DataTable/en-ph/KeyMap.dat`/`KeyMap_NKM.dat`,
+# `System/RFVisuals/rf-smaa.ini`/`rf-visuals.ini`, `System/default.cfg` --
+# see docs/knowledge/client-file-formats.md's "Runtime state" section.
+#
 # "client" converts .edf instead of .dat (BACKLOG #100): convert=False turns
 # the .dat pass off, convert_edf=True turns the rf_edf.py pass on. The two are
 # separate flags rather than one "format" name because they are separate
@@ -507,7 +525,10 @@ ROOT_PROFILES = {
     "client": {"convert": False, "convert_edf": True,
               "find_fn": find_client_verbatim,
               "excluded_fn": find_client_excluded,
-              "gitattributes": CLIENT_GITATTRIBUTES},
+              "gitattributes": CLIENT_GITATTRIBUTES,
+              "state_patterns": ["Launcher.ini", "DataTable/clientdb.dat",
+                                 "R3Engine.ini",
+                                 "DataTable/GameSetting.ini"]},
 }
 
 
@@ -924,10 +945,11 @@ def write_repo_meta(repo, server_root, manifest, n_dats=None,
     if state:
         coverage += (
             "\n\n%d of those config files are runtime state the running "
-            "server rewrites on its own (BACKLOG #85), not stable config -- "
-            "`status`/`build` never compare or overwrite one; `build "
-            "--confirm --seed-state` places only whichever are entirely "
-            "absent from the install." % len(state))
+            "install rewrites on its own (BACKLOG #85 server-side, #164 "
+            "client-side), not stable config -- `status`/`build` never "
+            "compare or overwrite one; `build --confirm --seed-state` "
+            "places only whichever are entirely absent from the install."
+            % len(state))
     if secrets:
         coverage += (
             "\n\n%d of those config files contain credentials and are listed "
@@ -1263,11 +1285,12 @@ def diff_files(repo, server_root, manifest):
     only .example templates are tracked) - it is not a broken table, so it
     is skipped here rather than reported as ERROR and blocking every build.
 
-    A key listed in manifest["state"] (BACKLOG #85) is runtime state the
-    running server rewrites on its own -- comparing it to the repo's snapshot
-    would report drift that is expected and never "wrong", so it is skipped
-    here the same way. build_to_server's seed_state is the only path that
-    ever writes one, and only when the install lacks it entirely.
+    A key listed in manifest["state"] (BACKLOG #85 server-side, #164
+    client-side) is runtime state the running install rewrites on its own --
+    comparing it to the repo's snapshot would report drift that is expected
+    and never "wrong", so it is skipped here the same way. build_to_server's
+    seed_state is the only path that ever writes one, and only when the
+    install lacks it entirely.
     """
     out = []
     secrets = manifest.get("secrets", {})
@@ -1383,11 +1406,12 @@ def build_to_server(repo, server_root=None, only=None, apply=False,
     repopulate a live install that is deliberately thin (#79).
 
     manifest["state"] entries (BACKLOG #85: e.g. the 26 SystemSave/*_Boss.ini
-    boss-respawn files) never appear in `statuses` at all -- diff_files skips
-    them, so allow_create can't reach them either. seed_state is the one way
-    to write one, and only for whichever are entirely absent from the
-    install: never overwrites one that already exists, however different its
-    content, because that content is live server state, not stale data.
+    boss-respawn files; BACKLOG #164: the client's Launcher.ini/clientdb.dat)
+    never appear in `statuses` at all -- diff_files skips them, so
+    allow_create can't reach them either. seed_state is the one way to write
+    one, and only for whichever are entirely absent from the install: never
+    overwrites one that already exists, however different its content,
+    because that content is live install state, not stale data.
     """
     manifest = read_manifest(repo)
     server_root = server_root or manifest["server_root"]
@@ -1610,11 +1634,12 @@ def cmd_status(args):
                 print("  %-58s %s" % (s.rel[-58:], s.detail[:60]))
             print()
         if n_state:
-            print("runtime state, not compared (%d): the running server "
-                  "rewrites these on its own (e.g. boss respawn state); "
-                  "ordinary status/build never touches them -- 'build "
-                  "--confirm --seed-state' places only whichever are "
-                  "entirely absent from the install\n" % n_state)
+            print("runtime state, not compared (%d): the running install "
+                  "rewrites these on its own (e.g. boss respawn state, or "
+                  "the client's Launcher.ini/clientdb.dat); ordinary "
+                  "status/build never touches them -- 'build --confirm "
+                  "--seed-state' places only whichever are entirely absent "
+                  "from the install\n" % n_state)
         print("%d unchanged, %d changed, %d missing, %d broken, %d no-repo"
               % (len(statuses) - len(changed) - len(broken) - len(gone)
                  - len(norepo),
@@ -1693,10 +1718,11 @@ def main(argv=None):
                    "install that's deliberately thin.")
     b.add_argument("--seed-state", action="store_true",
                    help="also place manifest[\"state\"] entries (e.g. the "
-                   "SystemSave/*_Boss.ini boss-respawn files) that are "
+                   "server's SystemSave/*_Boss.ini boss-respawn files, or "
+                   "the client's Launcher.ini/clientdb.dat) that are "
                    "entirely absent from the install -- never overwrites "
                    "one that already exists, since that content is live "
-                   "server state, not stale data. Needed once on a "
+                   "install state, not stale data. Needed once on a "
                    "genuinely fresh install; never implied by "
                    "--allow-create.")
     b.set_defaults(func=cmd_build)
