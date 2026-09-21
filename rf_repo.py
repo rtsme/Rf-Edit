@@ -629,7 +629,28 @@ def read_manifest(repo):
             "%s has no %s -- it isn't an rf-data repo (or was made by an "
             "older version)." % (repo, MANIFEST))
     with open(path, "r", encoding="ascii") as f:
-        return json.load(f)
+        return with_profile_state(json.load(f))
+
+
+def with_profile_state(doc):
+    """`doc` with manifest["state"] widened to everything its profile says is
+    runtime state (BACKLOG #175).
+
+    `state` is written into the manifest by `create` and `sync-files`, so a
+    manifest made before a profile gained its `state_patterns` simply does not
+    have the key -- and every reader below treats a missing key as "no runtime
+    state", which silently turns the protection off. That is what happened to
+    the client root: #164 added the patterns, rf-data's committed
+    client/rfrepo.json was never regenerated, and `build --confirm` kept
+    overwriting a real install's Launcher.ini and clientdb.dat. The profile is
+    the source of truth for which files are state, so it is applied here, at
+    the one place every reader gets the manifest from, rather than trusting a
+    stored list to have kept up. Entries already in the manifest are kept.
+    """
+    derived = compute_state_keys(doc.get("files", {}), doc.get("profile"))
+    if derived:
+        doc["state"] = sorted(set(doc.get("state", [])) | set(derived))
+    return doc
 
 
 def write_manifest(repo, doc):

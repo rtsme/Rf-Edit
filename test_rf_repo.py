@@ -27,11 +27,14 @@ def _write(path, data=b""):
         f.write(data)
 
 
-def _make_repo(tmp, files, state=()):
+def _make_repo(tmp, files, state=(), profile=None, write_state=True):
     """A minimal repo (no tables) with one files/ entry per (rel, blob).
 
     `state` names keys (a subset of `files`) that go into manifest["state"]
-    -- the BACKLOG #85 runtime-state category.
+    -- the BACKLOG #85 runtime-state category.  `profile` records the root
+    profile ("server"/"client") as `create` does.  `write_state=False` leaves
+    the "state" key out of the manifest entirely, the shape of a manifest
+    written before its profile gained state_patterns (BACKLOG #175).
     """
     repo = os.path.join(tmp, "repo")
     server_root = os.path.join(tmp, "server")
@@ -47,10 +50,14 @@ def _make_repo(tmp, files, state=()):
             # shape): tracked, but nothing was ever captured for it.
             manifest_files[rel] = {"sha": "0" * 64, "bytes": 0}
     import json
+    doc = {"server_root": server_root, "tables": {},
+           "files": manifest_files, "secrets": {}}
+    if write_state:
+        doc["state"] = sorted(state)
+    if profile:
+        doc["profile"] = profile
     with open(os.path.join(repo, "rfrepo.json"), "w") as f:
-        json.dump({"server_root": server_root, "tables": {},
-                   "files": manifest_files, "secrets": {},
-                   "state": sorted(state)}, f)
+        json.dump(doc, f)
     return repo, server_root
 
 
@@ -257,6 +264,89 @@ class ClientStateProfileTests(unittest.TestCase):
             with open(os.path.join(client_root, "DataTable", "clientdb.dat"),
                      "rb") as f:
                 self.assertEqual(f.read(), b"[0AOPEH]\nMoveMode=2\n")
+
+
+class OldManifestStateTests(unittest.TestCase):
+    """BACKLOG #175: #164's test above hands `state=` to the fixture, so it
+    only ever ran against a manifest that already HAS a "state" key -- which
+    rf-data's committed client/rfrepo.json does not, having been written
+    before #164 gave the client profile its state_patterns. Against that real
+    manifest `status` listed Launcher.ini and clientdb.dat as WOULD CHANGE and
+    `build --confirm` overwrote both. These use the same manifest shape the
+    real one has: a client profile and no "state" key at all.
+    """
+
+    FILES = {"Launcher.ini": b"LoginIP=127.0.0.1\n",
+             "DataTable/clientdb.dat": b"[0AOPEH]\nMoveMode=1\n",
+             "System/staff.txt": b"authored content\n"}
+
+    def _old_client_repo(self, tmp):
+        return _make_repo(tmp, self.FILES, profile="client", write_state=False)
+
+    def test_read_manifest_adds_the_profiles_state_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _client_root = self._old_client_repo(tmp)
+            with open(os.path.join(repo, "rfrepo.json")) as f:
+                self.assertNotIn("state", json.load(f))    # the old shape
+            state = rf_repo.read_manifest(repo)["state"]
+            self.assertEqual(["DataTable/clientdb.dat", "Launcher.ini"], state)
+            self.assertNotIn("System/staff.txt", state)
+
+    def test_status_ignores_a_locally_modified_state_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, client_root = self._old_client_repo(tmp)
+            for rel, blob in self.FILES.items():
+                _write(os.path.join(client_root, rel), blob)
+            _write(os.path.join(client_root, "Launcher.ini"),
+                   b"LoginIP=169.58.73.166\n")
+            _write(os.path.join(client_root, "DataTable", "clientdb.dat"),
+                   b"[0AOPEH]\nMoveMode=2\n")
+            statuses = diff_repo(repo, client_root)
+            # The ordinary file is reported (unchanged); the two state files,
+            # though their bytes differ from the repo's, are not reported.
+            self.assertEqual(["System/staff.txt"], [s.rel for s in statuses])
+            self.assertFalse(any(s.state == Status.CHANGED for s in statuses))
+
+    def test_build_confirm_leaves_state_files_alone_but_still_writes_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, client_root = self._old_client_repo(tmp)
+            _write(os.path.join(client_root, "Launcher.ini"),
+                   b"LoginIP=169.58.73.166\n")
+            _write(os.path.join(client_root, "DataTable", "clientdb.dat"),
+                   b"[0AOPEH]\nMoveMode=2\n")
+            # Ordinary authored content that DOES differ must still be built.
+            _write(os.path.join(client_root, "System", "staff.txt"), b"old\n")
+            pending, _backup = build_to_server(repo, client_root, apply=True)
+            self.assertEqual(["System/staff.txt"], [s.rel for s in pending])
+            with open(os.path.join(client_root, "Launcher.ini"), "rb") as f:
+                self.assertEqual(b"LoginIP=169.58.73.166\n", f.read())
+            with open(os.path.join(client_root, "DataTable", "clientdb.dat"),
+                      "rb") as f:
+                self.assertEqual(b"[0AOPEH]\nMoveMode=2\n", f.read())
+            with open(os.path.join(client_root, "System", "staff.txt"), "rb") as f:
+                self.assertEqual(b"authored content\n", f.read())
+
+    def test_entries_already_in_the_manifest_are_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _root = _make_repo(
+                tmp, self.FILES, state=["System/staff.txt"], profile="client")
+            state = rf_repo.read_manifest(repo)["state"]
+            self.assertEqual(["DataTable/clientdb.dat", "Launcher.ini",
+                              "System/staff.txt"], state)
+
+    def test_a_manifest_with_no_profile_is_left_as_it_was(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _root = _make_repo(tmp, self.FILES, write_state=False)
+            self.assertNotIn("state", rf_repo.read_manifest(repo))
+
+    def test_server_profile_still_derives_its_own_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _root = _make_repo(
+                tmp, {"Zoneserver/SystemSave/Boss1_Boss.ini": b"x",
+                      "Launcher.ini": b"not server state"},
+                profile="server", write_state=False)
+            self.assertEqual(["Zoneserver/SystemSave/Boss1_Boss.ini"],
+                             rf_repo.read_manifest(repo)["state"])
 
 
 if __name__ == "__main__":
