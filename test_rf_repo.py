@@ -15,9 +15,10 @@ import tempfile
 import unittest
 import unittest.mock
 
+import rf_dat
 import rf_edf
 import rf_repo
-from rf_dat import SchemaError
+from rf_dat import SchemaError, Table, write_schema_json
 from rf_repo import Status, build_to_server, diff_repo, sha_bytes
 
 
@@ -839,6 +840,174 @@ class ClientMapScanTests(unittest.TestCase):
                     rf_repo, "CLIENT_SCAN_DIRS", ("DataTable", "System")):
                 self.assertNotIn("Map/Cauldron01/Dummy.txt",
                                  rf_repo.find_client_verbatim(tmp))
+
+
+class RefreshManifestTests(unittest.TestCase):
+    """BACKLOG #197: a rf-data PR that edits a CSV/files/ entry's committed
+    content leaves that entry's rfrepo.json hash stale until some later
+    `build --confirm` happens to touch the same entry and silently
+    re-patches it (BACKLOG #190's root cause). `refresh_manifest` fixes the
+    cached hash from committed repo content alone -- no install involved --
+    so these fixtures never create a server_root at all, proving the point.
+    """
+
+    TABLE_SCHEMA = [("Id", "dword"), ("Val", "dword")]
+
+    def _make_table_repo(self, tmp, rel, rows):
+        repo = os.path.join(tmp, "repo")
+        native = rel.replace("/", os.sep)
+        csv_path = os.path.join(repo, "csv", rf_repo.rel_to_csv(native))
+        schema_path = os.path.join(repo, "schemas",
+                                   rf_repo.rel_to_schema(native))
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        os.makedirs(os.path.dirname(schema_path), exist_ok=True)
+        t = Table(self.TABLE_SCHEMA, rows, len(self.TABLE_SCHEMA),
+                  rf_dat.record_size(self.TABLE_SCHEMA))
+        t.export_csv(csv_path)
+        write_schema_json(self.TABLE_SCHEMA, schema_path, dat_name=rel,
+                          source="test fixture")
+        doc = {
+            "tables": {rel: {"csv_sha": "0" * 64, "dat_sha": "0" * 64,
+                             "records": len(rows)}},
+            "edf": {}, "files": {}, "secrets": {},
+        }
+        with open(os.path.join(repo, rf_repo.MANIFEST), "w") as f:
+            json.dump(doc, f)
+        return repo
+
+    def _edit_table_csv(self, repo, rel, rows):
+        native = rel.replace("/", os.sep)
+        csv_path = os.path.join(repo, "csv", rf_repo.rel_to_csv(native))
+        t = Table(self.TABLE_SCHEMA, rows, len(self.TABLE_SCHEMA),
+                  rf_dat.record_size(self.TABLE_SCHEMA))
+        t.export_csv(csv_path)
+
+    def test_stale_table_entry_gets_corrected_without_an_install(self):
+        rel = "Zoneserver/RF_Bin/script/Foo.dat"
+        native = rel.replace("/", os.sep)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._make_table_repo(tmp, rel, [{"Id": 1, "Val": 7}])
+            # Simulate a merged PR that edited the row without regenerating
+            # the manifest -- exactly #17's GuildyBoi-rename shape.
+            self._edit_table_csv(repo, rel, [{"Id": 1, "Val": 99}])
+            self.assertFalse(
+                os.path.exists(os.path.join(tmp, "server")),
+                "fixture must not need a server_root at all")
+
+            changed = rf_repo.refresh_manifest(repo)
+
+            self.assertEqual(changed, [rel])
+            manifest = rf_repo.read_manifest(repo)
+            entry = manifest["tables"][rel]
+            t, blob = rf_repo.build_table(repo, native)
+            self.assertEqual(
+                entry["csv_sha"],
+                rf_repo.sha(os.path.join(repo, "csv",
+                                         rf_repo.rel_to_csv(native))))
+            self.assertEqual(entry["dat_sha"], sha_bytes(blob))
+            self.assertEqual(entry["records"], 1)
+
+    def test_unedited_table_entry_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._make_table_repo(
+                tmp, "Zoneserver/RF_Bin/script/Foo.dat",
+                [{"Id": 1, "Val": 7}])
+            manifest = rf_repo.read_manifest(repo)
+            entry = manifest["tables"]["Zoneserver/RF_Bin/script/Foo.dat"]
+            self.assertEqual(entry["csv_sha"], "0" * 64)  # still the stub
+
+            changed = rf_repo.refresh_manifest(repo)
+            self.assertEqual(changed,
+                             ["Zoneserver/RF_Bin/script/Foo.dat"])
+            # A second run finds nothing left stale -- idempotent.
+            self.assertEqual(rf_repo.refresh_manifest(repo), [])
+
+    def test_stale_files_entry_gets_corrected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _server = _make_repo(tmp, {"System/WorldInfo.ini": b"old"})
+            # A merged PR edited the committed file (#188's ExcuteService
+            # toggle shape) without regenerating its manifest hash.
+            _write(os.path.join(repo, "files", "System", "WorldInfo.ini"),
+                  b"new-content")
+
+            changed = rf_repo.refresh_manifest(repo)
+
+            self.assertEqual(changed, ["System/WorldInfo.ini"])
+            manifest = rf_repo.read_manifest(repo)
+            entry = manifest["files"]["System/WorldInfo.ini"]
+            self.assertEqual(entry["sha"], sha_bytes(b"new-content"))
+            self.assertEqual(entry["bytes"], len(b"new-content"))
+
+    def test_secret_file_entry_is_never_recomputed(self):
+        # rule 12: a real credential value never enters git, so files/ has
+        # no copy to hash from -- must not be treated as stale/broken.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _server = _make_repo(tmp, {"System/rfacc.ini": b"x"})
+            manifest = rf_repo.read_manifest(repo)
+            manifest["secrets"] = {"System/rfacc.ini": ["password"]}
+            with open(os.path.join(repo, rf_repo.MANIFEST), "w") as f:
+                json.dump(manifest, f)
+            os.remove(os.path.join(repo, "files", "System", "rfacc.ini"))
+
+            self.assertEqual(rf_repo.refresh_manifest(repo), [])
+
+    def test_only_restricts_the_refresh_to_named_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _server = _make_repo(
+                tmp, {"System/A.ini": b"old-a", "System/B.ini": b"old-b"})
+            _write(os.path.join(repo, "files", "System", "A.ini"), b"new-a")
+            _write(os.path.join(repo, "files", "System", "B.ini"), b"new-b")
+
+            changed = rf_repo.refresh_manifest(repo, only=["System/A.ini"])
+
+            self.assertEqual(changed, ["System/A.ini"])
+            manifest = rf_repo.read_manifest(repo)
+            self.assertEqual(manifest["files"]["System/A.ini"]["sha"],
+                             sha_bytes(b"new-a"))
+            # B.ini was left stale -- only=[...] did not touch it.
+            self.assertEqual(manifest["files"]["System/B.ini"]["sha"],
+                             sha_bytes(b"old-b"))
+
+    def test_stale_edf_entry_gets_corrected_without_an_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            edf_tests = EdfRootTests()
+            repo, _root, _manifest, _skipped = edf_tests._create(
+                tmp, {"DataTable/Thing.edf": edf_tests._edf()})
+            edf_tests._edit_first_record(repo)
+            before = rf_repo.read_manifest(repo)["edf"][
+                "DataTable/Thing.edf"]["edf_sha"]
+
+            changed = rf_repo.refresh_manifest(repo)
+
+            self.assertEqual(changed, ["DataTable/Thing.edf"])
+            manifest = rf_repo.read_manifest(repo)
+            entry = manifest["edf"]["DataTable/Thing.edf"]
+            self.assertNotEqual(entry["edf_sha"], before)
+            _tables, blob = rf_repo.build_edf(repo, "DataTable/Thing.edf")
+            self.assertEqual(entry["edf_sha"], sha_bytes(blob))
+            self.assertEqual(entry["repo_sha"],
+                             rf_repo.edf_repo_sha(repo, "DataTable/Thing.edf"))
+
+    def test_refresh_leaves_status_agreeing_with_a_fresh_diff(self):
+        # The done-when proof: after refresh-manifest, the manifest's cached
+        # hash for a changed entry matches what a from-scratch recomputation
+        # gives -- the exact drift #190 found does not recur.
+        rel = "Zoneserver/RF_Bin/script/Foo.dat"
+        native = rel.replace("/", os.sep)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._make_table_repo(tmp, rel, [{"Id": 1, "Val": 7}])
+            self._edit_table_csv(
+                repo, rel, [{"Id": 1, "Val": 7}, {"Id": 2, "Val": 8}])
+            rf_repo.refresh_manifest(repo)
+            after = rf_repo.read_manifest(repo)
+
+            # Recompute independently, the way a from-scratch create would.
+            t, blob = rf_repo.build_table(repo, native)
+            csv_path = os.path.join(repo, "csv", rf_repo.rel_to_csv(native))
+            self.assertEqual(
+                after["tables"][rel],
+                {"csv_sha": rf_repo.sha(csv_path), "dat_sha": sha_bytes(blob),
+                 "records": 2})
 
 
 if __name__ == "__main__":
