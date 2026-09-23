@@ -8,6 +8,7 @@ server install needed.
 
 Run:  python -m unittest test_rf_repo -v
 """
+import argparse
 import json
 import os
 import struct
@@ -987,6 +988,50 @@ class RefreshManifestTests(unittest.TestCase):
             self.assertEqual(entry["edf_sha"], sha_bytes(blob))
             self.assertEqual(entry["repo_sha"],
                              rf_repo.edf_repo_sha(repo, "DataTable/Thing.edf"))
+
+    def test_dry_run_reports_without_writing(self):
+        # BACKLOG #198: a CI check must be able to report staleness without
+        # committing a fix on the runner's behalf.
+        rel = "Zoneserver/RF_Bin/script/Foo.dat"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._make_table_repo(tmp, rel, [{"Id": 1, "Val": 7}])
+            self._edit_table_csv(repo, rel, [{"Id": 1, "Val": 99}])
+            before = rf_repo.read_manifest(repo)["tables"][rel]["dat_sha"]
+
+            changed = rf_repo.refresh_manifest(repo, dry_run=True)
+
+            self.assertEqual(changed, [rel])
+            after = rf_repo.read_manifest(repo)["tables"][rel]["dat_sha"]
+            self.assertEqual(after, before, "dry_run must not write")
+            # A real run afterwards still finds (and fixes) the same entry.
+            self.assertEqual(rf_repo.refresh_manifest(repo), [rel])
+
+    def test_cmd_refresh_manifest_check_exits_nonzero_when_stale(self):
+        rel = "Zoneserver/RF_Bin/script/Foo.dat"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._make_table_repo(tmp, rel, [{"Id": 1, "Val": 7}])
+            self._edit_table_csv(repo, rel, [{"Id": 1, "Val": 99}])
+            args = argparse.Namespace(repo=repo, root=None, only=None,
+                                      check=True)
+
+            self.assertEqual(rf_repo.cmd_refresh_manifest(args), 1)
+            # --check must not have written -- still stale after.
+            manifest = rf_repo.read_manifest(repo)
+            t, blob = rf_repo.build_table(
+                repo, rel.replace("/", os.sep))
+            self.assertNotEqual(manifest["tables"][rel]["dat_sha"],
+                                sha_bytes(blob))
+
+    def test_cmd_refresh_manifest_check_exits_zero_when_clean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._make_table_repo(
+                tmp, "Zoneserver/RF_Bin/script/Foo.dat",
+                [{"Id": 1, "Val": 7}])
+            rf_repo.refresh_manifest(repo)  # bring the stub hash up to date
+            args = argparse.Namespace(repo=repo, root=None, only=None,
+                                      check=True)
+
+            self.assertEqual(rf_repo.cmd_refresh_manifest(args), 0)
 
     def test_refresh_leaves_status_agreeing_with_a_fresh_diff(self):
         # The done-when proof: after refresh-manifest, the manifest's cached
