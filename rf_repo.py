@@ -1354,6 +1354,103 @@ def diff_files(repo, server_root, manifest):
     return out
 
 
+# ---------------------------------------------------------- refresh-manifest
+
+def refresh_manifest(repo, only=None):
+    """Recompute every cached hash in the manifest from committed repo
+    content alone -- no install needed (BACKLOG #197).
+
+    `diff_repo`/`diff_edf`/`diff_files` never trust the manifest's cached
+    hash as a verdict, only as a fast-path skip: on a mismatch they rebuild
+    from the CSVs and byte-compare against the install directly, so a PR
+    that edits a CSV/files/ entry without this step causes no wrong
+    behaviour -- but it does leave rfrepo.json committed with a stale hash,
+    which the next `build --confirm` against ANY install (this machine, the
+    VPS, ...) independently rediscovers and silently re-patches, once per
+    clone. That is what BACKLOG #190 was.
+
+    The value this writes is exactly what a fresh `create`/`convert_edfs`
+    would have recorded had it run against an install whose file matched
+    the repo: `create`/`convert_edfs` only ever accept a CSV/EDF into the
+    repo after proving it rebuilds the original install bytes exactly, so
+    rebuilding from the *current* committed CSV and hashing the result is
+    that same proven value -- without needing an install to compare against.
+    An entry that no longer rebuilds (a bad edit, not just a stale hash) is
+    left alone; `status`/`build` already report that as ERROR.
+
+    `only` restricts the refresh to these manifest keys (any of tables/
+    edf/files); omitted, every entry is checked. Returns the sorted list of
+    keys whose recorded hash was stale and got corrected; the manifest is
+    rewritten only if that list is non-empty.
+    """
+    manifest = read_manifest(repo)
+    wanted = set(only) if only is not None else None
+    changed = []
+
+    tables = manifest.get("tables", {})
+    for rel in sorted(tables):
+        if wanted is not None and rel not in wanted:
+            continue
+        entry = tables[rel]
+        native = rel.replace("/", os.sep)
+        csv_path = os.path.join(repo, "csv", rel_to_csv(native))
+        try:
+            csv_sha = sha(csv_path)
+            t, blob = build_table(repo, native)
+        except (SchemaError, ValueError, OSError):
+            continue
+        dat_sha = sha_bytes(blob)
+        records = len(t.rows)
+        del t
+        if (entry.get("csv_sha") != csv_sha or entry.get("dat_sha") != dat_sha
+                or entry.get("records") != records):
+            entry["csv_sha"], entry["dat_sha"] = csv_sha, dat_sha
+            entry["records"] = records
+            changed.append(rel)
+
+    edf = manifest.get("edf", {})
+    for rel in sorted(edf):
+        if wanted is not None and rel not in wanted:
+            continue
+        entry = edf[rel]
+        try:
+            repo_sha = edf_repo_sha(repo, rel)
+            edf_tables, blob = build_edf(repo, rel)
+        except (SchemaError, ValueError, OSError):
+            continue
+        edf_sha = sha_bytes(blob)
+        n_tables = len(edf_tables)
+        n_records = sum(len(t.rows) for t in edf_tables)
+        if (entry.get("repo_sha") != repo_sha or entry.get("edf_sha") != edf_sha
+                or entry.get("tables") != n_tables
+                or entry.get("records") != n_records):
+            entry["repo_sha"], entry["edf_sha"] = repo_sha, edf_sha
+            entry["tables"], entry["records"] = n_tables, n_records
+            changed.append(rel)
+
+    files = manifest.get("files", {})
+    secrets = set(manifest.get("secrets", {}))
+    for rel in sorted(files):
+        if wanted is not None and rel not in wanted:
+            continue
+        if rel in secrets:
+            continue  # never committed -- nothing here to recompute from
+        entry = files[rel]
+        path = os.path.join(repo, "files", rel.replace("/", os.sep))
+        if not os.path.exists(path):
+            continue  # NOREPO -- status already reports this
+        with open(path, "rb") as f:
+            blob = f.read()
+        file_sha, n_bytes = sha_bytes(blob), len(blob)
+        if entry.get("sha") != file_sha or entry.get("bytes") != n_bytes:
+            entry["sha"], entry["bytes"] = file_sha, n_bytes
+            changed.append(rel)
+
+    if changed:
+        write_manifest(repo, manifest)
+    return sorted(changed)
+
+
 def text_changes(repo, rel, server_root, limit=500):
     """Line-level diff of one verbatim file. [(lineno, tag, server, repo)].
 
@@ -1618,6 +1715,23 @@ def cmd_sync_files(args):
     return 0
 
 
+def cmd_refresh_manifest(args):
+    roots = resolve_roots(args.repo, args.root)
+    for name, path in roots:
+        if name:
+            print("=== %s ===" % name)
+        changed = refresh_manifest(path, only=args.only or None)
+        if changed:
+            print("%d entr%s refreshed (cached hash was stale):"
+                  % (len(changed), "y" if len(changed) == 1 else "ies"))
+            for rel in changed:
+                print("  %s" % rel)
+        else:
+            print("Nothing to refresh -- every cached hash already matches "
+                  "committed content.")
+    return 0
+
+
 def cmd_status(args):
     roots = resolve_roots(args.repo, args.root)
     _check_single_server_override(roots, args.server)
@@ -1729,6 +1843,19 @@ def main(argv=None):
                    ).set_defaults(func=cmd_sync_files)
     sub.add_parser("status", help="what would change on the install").set_defaults(
         func=cmd_status)
+    r = sub.add_parser("refresh-manifest",
+                       help="recompute every cached hash in the manifest "
+                       "from committed repo content alone -- no install "
+                       "needed. Run this after any PR that edits a CSV/"
+                       "files/ entry's content, before merging, so "
+                       "rfrepo.json never commits a stale hash (BACKLOG "
+                       "#197). Does not read or write the install.")
+    r.add_argument("--only", action="append", default=None,
+                   help="limit the refresh to this manifest key (forward-"
+                   "slash path, e.g. Zoneserver/RF_Bin/script/Foo.dat or "
+                   "DataTable/en-ph/NDStore.edf); repeatable. Omitted: "
+                   "check every entry in the root(s).")
+    r.set_defaults(func=cmd_refresh_manifest)
     b = sub.add_parser("build", help="write changed tables to the install")
     b.add_argument("--confirm", action="store_true",
                    help="actually write (without it, only lists changes)")
