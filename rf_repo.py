@@ -1356,7 +1356,7 @@ def diff_files(repo, server_root, manifest):
 
 # ---------------------------------------------------------- refresh-manifest
 
-def refresh_manifest(repo, only=None):
+def refresh_manifest(repo, only=None, dry_run=False):
     """Recompute every cached hash in the manifest from committed repo
     content alone -- no install needed (BACKLOG #197).
 
@@ -1382,6 +1382,10 @@ def refresh_manifest(repo, only=None):
     edf/files); omitted, every entry is checked. Returns the sorted list of
     keys whose recorded hash was stale and got corrected; the manifest is
     rewritten only if that list is non-empty.
+
+    `dry_run=True` (BACKLOG #198) computes and returns the same list without
+    writing anything -- for a CI check that must not commit on the runner's
+    behalf, only report what a human would need to fix.
     """
     manifest = read_manifest(repo)
     wanted = set(only) if only is not None else None
@@ -1446,7 +1450,7 @@ def refresh_manifest(repo, only=None):
             entry["sha"], entry["bytes"] = file_sha, n_bytes
             changed.append(rel)
 
-    if changed:
+    if changed and not dry_run:
         write_manifest(repo, manifest)
     return sorted(changed)
 
@@ -1717,18 +1721,26 @@ def cmd_sync_files(args):
 
 def cmd_refresh_manifest(args):
     roots = resolve_roots(args.repo, args.root)
+    any_stale = False
     for name, path in roots:
         if name:
             print("=== %s ===" % name)
-        changed = refresh_manifest(path, only=args.only or None)
+        changed = refresh_manifest(path, only=args.only or None,
+                                   dry_run=args.check)
         if changed:
-            print("%d entr%s refreshed (cached hash was stale):"
-                  % (len(changed), "y" if len(changed) == 1 else "ies"))
+            any_stale = True
+            verb = "would be refreshed" if args.check else "refreshed"
+            print("%d entr%s %s (cached hash was stale):"
+                  % (len(changed), "y" if len(changed) == 1 else "ies", verb))
             for rel in changed:
                 print("  %s" % rel)
         else:
             print("Nothing to refresh -- every cached hash already matches "
                   "committed content.")
+    if args.check and any_stale:
+        print("\nrun `refresh-manifest` (without --check) and commit the "
+              "result before merging (BACKLOG #198).")
+        return 1
     return 0
 
 
@@ -1855,6 +1867,11 @@ def main(argv=None):
                    "slash path, e.g. Zoneserver/RF_Bin/script/Foo.dat or "
                    "DataTable/en-ph/NDStore.edf); repeatable. Omitted: "
                    "check every entry in the root(s).")
+    r.add_argument("--check", action="store_true",
+                   help="report what would be refreshed and exit 1 if "
+                   "anything is stale, without writing rfrepo.json -- for "
+                   "a CI/pre-commit gate (BACKLOG #198), not a workflow "
+                   "step meant to fix and commit on your behalf.")
     r.set_defaults(func=cmd_refresh_manifest)
     b = sub.add_parser("build", help="write changed tables to the install")
     b.add_argument("--confirm", action="store_true",
