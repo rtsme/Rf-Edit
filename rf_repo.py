@@ -1534,6 +1534,15 @@ def build_to_server(repo, server_root=None, only=None, apply=False,
     one, and only for whichever are entirely absent from the install: never
     overwrites one that already exists, however different its content,
     because that content is live install state, not stale data.
+
+    Never writes rfrepo.json (BACKLOG #204). A CHANGED entry usually means
+    its cached hash was genuinely stale (#190's shape: a CSV/files/ edit
+    merged without running refresh-manifest) -- writing the fresh hash back
+    here would leave the checkout's manifest locally modified, which on a
+    production checkout that only ever fast-forwards blocks the next
+    `git merge --ff-only`. The cached hash is only ever a fast-path skip for
+    diff_repo/diff_edf/diff_files, never their verdict, so leaving it stale
+    costs a slower rebuild-and-compare next time, not a wrong answer.
     """
     manifest = read_manifest(repo)
     server_root = server_root or manifest["server_root"]
@@ -1582,8 +1591,6 @@ def build_to_server(repo, server_root=None, only=None, apply=False,
                 blob = f.read()
             with open(live_path, "wb") as f:
                 f.write(blob)
-            manifest["files"][s.rel]["sha"] = sha_bytes(blob)
-            manifest["files"][s.rel]["bytes"] = len(blob)
         elif s.kind == Status.EDF:
             # Rebuilt from the CSVs and re-encrypted with the file's own key.
             # Anything that would not rebuild was already an ERROR above, so
@@ -1591,16 +1598,10 @@ def build_to_server(repo, server_root=None, only=None, apply=False,
             _tables, blob = build_edf(repo, s.rel)
             with open(live_path, "wb") as f:
                 f.write(blob)
-            manifest["edf"][s.rel]["edf_sha"] = sha_bytes(blob)
-            manifest["edf"][s.rel]["repo_sha"] = edf_repo_sha(repo, s.rel)
         else:
             _t, blob = build_table(repo, native)
             with open(live_path, "wb") as f:
                 f.write(blob)
-            manifest["tables"][s.rel]["dat_sha"] = sha_bytes(blob)
-            manifest["tables"][s.rel]["csv_sha"] = sha(
-                os.path.join(repo, "csv", rel_to_csv(native)))
-    write_manifest(repo, manifest)
     return pending, backup_dir
 
 

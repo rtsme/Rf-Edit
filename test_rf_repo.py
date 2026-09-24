@@ -1006,6 +1006,52 @@ class RefreshManifestTests(unittest.TestCase):
             # A real run afterwards still finds (and fixes) the same entry.
             self.assertEqual(rf_repo.refresh_manifest(repo), [rel])
 
+    def test_build_against_a_stale_manifest_does_not_modify_rfrepo_json(self):
+        # BACKLOG #204: a PR that edited a CSV without running refresh-
+        # manifest (#190's shape) leaves the manifest's cached hash stale.
+        # The first `build --confirm` against a real install then rebuilds,
+        # finds the install genuinely differs (the edit was never applied
+        # there), and correctly writes the new content -- but used to also
+        # rewrite the checkout's rfrepo.json to match, leaving it locally
+        # modified. On a production checkout that's never meant to carry
+        # local commits, that blocks the next `git merge --ff-only`
+        # (exit 66) until someone cleans it up by hand -- this is what
+        # actually happened on the VPS (session 188, 2026-09-23).
+        rel = "Zoneserver/RF_Bin/script/Foo.dat"
+        native = rel.replace("/", os.sep)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._make_table_repo(tmp, rel, [{"Id": 1, "Val": 7}])
+            # The install already has the pre-edit content built.
+            _t, old_blob = rf_repo.build_table(repo, native)
+            server_root = os.path.join(tmp, "server")
+            _write(os.path.join(server_root, native), old_blob)
+            # The edit lands without refresh-manifest -- the manifest's
+            # stub hash ("0" * 64) was already stale before this, and stays
+            # stale; nothing here ever re-commits a fixed rfrepo.json.
+            self._edit_table_csv(repo, rel, [{"Id": 1, "Val": 99}])
+            rfrepo_path = os.path.join(repo, rf_repo.MANIFEST)
+            with open(rfrepo_path, "rb") as f:
+                before = f.read()
+
+            pending, _backup = build_to_server(repo, server_root, apply=True)
+
+            self.assertEqual([s.rel for s in pending], [rel])
+            with open(os.path.join(server_root, native), "rb") as f:
+                live = f.read()
+            _t, new_blob = rf_repo.build_table(repo, native)
+            self.assertEqual(live, new_blob,
+                             "the real edit still reaches the install")
+            with open(rfrepo_path, "rb") as f:
+                after = f.read()
+            self.assertEqual(after, before,
+                             "build must not modify the checkout's manifest")
+            # No incorrect regression: status still agrees the install now
+            # matches the repo, even though the cached hash was never
+            # refreshed -- diff_repo's rebuild-and-compare fallback proves
+            # it fresh every time instead.
+            states = {s.rel: s.state for s in diff_repo(repo, server_root)}
+            self.assertEqual(states[rel], Status.SAME)
+
     def test_cmd_refresh_manifest_check_exits_nonzero_when_stale(self):
         rel = "Zoneserver/RF_Bin/script/Foo.dat"
         with tempfile.TemporaryDirectory() as tmp:
