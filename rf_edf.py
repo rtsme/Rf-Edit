@@ -725,6 +725,16 @@ class StampedDirectoryError(EdfError):
     """
 
 
+# Rows deliberately placed in another block's slice: {slice owner: blocks its
+# rows may name instead}. The client lists a tool kit's recipes by slice, and
+# each row then names its own result table, so a recipe whose result is in a
+# table no kit lists can only appear by sitting in a kit's slice. BACKLOG
+# #395: Excelsiar A/B/C (BootyItem, block 20) in the Bullet Tool Kit's slice
+# (block 11) -- the client's list builder at 00480ED0 walks slice 11 and
+# looks each row up by its own (table, index) at +4/+8.
+STAMPED_GUEST_OWNERS = {11: frozenset({20})}
+
+
 def check_stamped_directory(tables, source="EDF payload"):
     """Refuse a stamped payload whose footer disagrees with the block it indexes.
 
@@ -741,6 +751,7 @@ def check_stamped_directory(tables, source="EDF payload"):
         no gap and no overlap;
       * every row of it carries, in its second field, the index of the block
         whose range contains it. Its first field is the row's own number.
+        The one exception is a guest row `STAMPED_GUEST_OWNERS` names.
 
     Deliberately shape-guarded rather than named: a payload that is stamped
     but carries no footer of this shape is left alone, because there is only
@@ -798,7 +809,9 @@ def check_stamped_directory(tables, source="EDF payload"):
         for row in range(first[i], first[i] + length[i]):
             owner_of[row] = i
     for row, values in enumerate(target.rows):
-        if values[owner_field] != owner_of[row]:
+        if (values[owner_field] != owner_of[row]
+                and values[owner_field] not in
+                STAMPED_GUEST_OWNERS.get(owner_of[row], ())):
             raise StampedDirectoryError(
                 "%s: block %d row %d says it belongs to block %s, but the "
                 "directory puts that row in block %d's slice"
