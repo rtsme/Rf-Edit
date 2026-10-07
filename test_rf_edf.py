@@ -15,7 +15,9 @@ import os
 import struct
 import tempfile
 import unittest
+from unittest import mock
 
+import rf_edf
 from rf_dat import SchemaError, Table, infer_schema, write_schema_json
 from rf_edf import (CHAIN_HEADER, CHAIN_HEADER_SIZE, DAT_HEADER, EDF_MIN_TEXT_SHARE,
                     EDF_STRING_WIDTHS, EDF_TABLE_GRAMMARS, KEY_LENGTH, MAGIC,
@@ -1873,6 +1875,20 @@ class StampedDirectoryTests(unittest.TestCase):
             parse_stamped_tables(
                 self._payload(owners=(0, 0, 0, 1, 1)), "Item.edf")
         self.assertIn("row 2", str(caught.exception))
+
+    def test_accepts_a_guest_row_only_where_it_is_allowed(self):
+        """BACKLOG #395: a slice may hold rows naming a listed guest block."""
+        guest = self._payload(owners=(0, 0, 1, 1, 0))     # row 4 names 0 in 1's slice
+        with mock.patch.dict(rf_edf.STAMPED_GUEST_OWNERS, {1: frozenset({0})},
+                             clear=True):
+            self.assertEqual(len(parse_stamped_tables(guest, "Item.edf")), 4)
+        with mock.patch.dict(rf_edf.STAMPED_GUEST_OWNERS, {0: frozenset({1})},
+                             clear=True):
+            with self.assertRaises(StampedDirectoryError):
+                parse_stamped_tables(guest, "Item.edf")
+
+    def test_the_bullet_kit_slice_may_hold_booty_results(self):
+        self.assertEqual(rf_edf.STAMPED_GUEST_OWNERS, {11: frozenset({20})})
 
     def test_refuses_a_negative_row_count(self):
         with self.assertRaises(StampedDirectoryError):
