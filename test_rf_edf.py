@@ -1887,8 +1887,25 @@ class StampedDirectoryTests(unittest.TestCase):
             with self.assertRaises(StampedDirectoryError):
                 parse_stamped_tables(guest, "Item.edf")
 
-    def test_the_bullet_kit_slice_may_hold_booty_results(self):
-        self.assertEqual(rf_edf.STAMPED_GUEST_OWNERS, {11: frozenset({20})})
+    def test_the_kit_slices_may_hold_only_their_listed_guests(self):
+        """#395: booty in the Bullet kit; #530: a box in the Weapon kit and
+        one in the Armour kit's helmet slice."""
+        self.assertEqual(rf_edf.STAMPED_GUEST_OWNERS,
+                         {5: frozenset({31}), 6: frozenset({31}),
+                          11: frozenset({20})})
+
+    def test_a_box_row_in_the_weapon_slice_parses_and_others_do_not(self):
+        """#530: owner 31 is a guest of slice 6, and of no other slice."""
+        def payload_with(owner_of_last):
+            # _payload's rows 2-4 are slice 1; slice 6's real guest set is
+            # mapped onto slice 1 below, so row 4 plays the box recipe
+            return self._payload(owners=(0, 0, 1, 1, owner_of_last))
+        with mock.patch.dict(rf_edf.STAMPED_GUEST_OWNERS,
+                             {1: rf_edf.STAMPED_GUEST_OWNERS[6]}, clear=True):
+            self.assertEqual(
+                len(parse_stamped_tables(payload_with(31), "Item.edf")), 4)
+            with self.assertRaises(StampedDirectoryError):
+                parse_stamped_tables(payload_with(20), "Item.edf")
 
     def test_refuses_a_negative_row_count(self):
         with self.assertRaises(StampedDirectoryError):
