@@ -733,8 +733,11 @@ class StampedDirectoryError(EdfError):
 # (block 11) -- the client's list builder at 00480ED0 walks slice 11 and
 # looks each row up by its own (table, index) at +4/+8. BACKLOG #530: the
 # Special Craft T1 Weapon Box (BoxItem, block 31) in the Weapon kit's slice
-# (block 6) -- its builder 00480890 never checks the result table either.
-STAMPED_GUEST_OWNERS = {6: frozenset({31}), 11: frozenset({20})}
+# (block 6), and the T1 Armour Box in the Armour kit's first tab, the helmet
+# slice (block 5) -- builders 00480890 and 00480CA0 never check the result
+# table either.
+STAMPED_GUEST_OWNERS = {5: frozenset({31}), 6: frozenset({31}),
+                        11: frozenset({20})}
 
 
 def check_stamped_directory(tables, source="EDF payload"):

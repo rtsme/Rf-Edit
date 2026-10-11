@@ -1888,9 +1888,11 @@ class StampedDirectoryTests(unittest.TestCase):
                 parse_stamped_tables(guest, "Item.edf")
 
     def test_the_kit_slices_may_hold_only_their_listed_guests(self):
-        """#395: booty in the Bullet kit; #530: a box in the Weapon kit."""
+        """#395: booty in the Bullet kit; #530: a box in the Weapon kit and
+        one in the Armour kit's helmet slice."""
         self.assertEqual(rf_edf.STAMPED_GUEST_OWNERS,
-                         {6: frozenset({31}), 11: frozenset({20})})
+                         {5: frozenset({31}), 6: frozenset({31}),
+                          11: frozenset({20})})
 
     def test_a_box_row_in_the_weapon_slice_parses_and_others_do_not(self):
         """#530: owner 31 is a guest of slice 6, and of no other slice."""
