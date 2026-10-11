@@ -731,8 +731,10 @@ class StampedDirectoryError(EdfError):
 # table no kit lists can only appear by sitting in a kit's slice. BACKLOG
 # #395: Excelsiar A/B/C (BootyItem, block 20) in the Bullet Tool Kit's slice
 # (block 11) -- the client's list builder at 00480ED0 walks slice 11 and
-# looks each row up by its own (table, index) at +4/+8.
-STAMPED_GUEST_OWNERS = {11: frozenset({20})}
+# looks each row up by its own (table, index) at +4/+8. BACKLOG #530: the
+# Special Craft T1 Weapon Box (BoxItem, block 31) in the Weapon kit's slice
+# (block 6) -- its builder 00480890 never checks the result table either.
+STAMPED_GUEST_OWNERS = {6: frozenset({31}), 11: frozenset({20})}
 
 
 def check_stamped_directory(tables, source="EDF payload"):
