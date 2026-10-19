@@ -1079,6 +1079,36 @@ class RefreshManifestTests(unittest.TestCase):
 
             self.assertEqual(rf_repo.cmd_refresh_manifest(args), 0)
 
+    def test_cmd_refresh_manifest_only_refuses_an_unknown_key(self):
+        # BACKLOG #698: the CSV path for a .dat-keyed entry used to print
+        # "Nothing to refresh" and exit 0, leaving the real entry stale.
+        rel = "Zoneserver/RF_Bin/script/Foo.dat"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._make_table_repo(tmp, rel, [{"Id": 1, "Val": 7}])
+            self._edit_table_csv(repo, rel, [{"Id": 1, "Val": 99}])
+            before = rf_repo.read_manifest(repo)
+            args = argparse.Namespace(
+                repo=repo, root=None, check=False,
+                only=["csv/Zoneserver/RF_Bin/script/Foo.csv"])
+
+            with unittest.mock.patch("sys.stderr") as err:
+                self.assertEqual(rf_repo.cmd_refresh_manifest(args), 2)
+            said = "".join(c.args[0] for c in err.write.call_args_list)
+            self.assertIn("did you mean: %s" % rel, said)
+            self.assertEqual(rf_repo.read_manifest(repo), before,
+                             "a refused --only must write nothing")
+
+            # A known key mixed with an unknown one refuses the whole run;
+            # the right key alone still refreshes.
+            args.only = [rel, "Zoneserver/RF_Bin/script/Bar.dat"]
+            with unittest.mock.patch("sys.stderr"):
+                self.assertEqual(rf_repo.cmd_refresh_manifest(args), 2)
+            self.assertEqual(rf_repo.read_manifest(repo), before)
+            args.only = [rel]
+            with unittest.mock.patch("sys.stdout"):
+                self.assertEqual(rf_repo.cmd_refresh_manifest(args), 0)
+            self.assertNotEqual(rf_repo.read_manifest(repo), before)
+
     def test_refresh_leaves_status_agreeing_with_a_fresh_diff(self):
         # The done-when proof: after refresh-manifest, the manifest's cached
         # hash for a changed entry matches what a from-scratch recomputation
