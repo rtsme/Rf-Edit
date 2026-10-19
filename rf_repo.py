@@ -1720,8 +1720,49 @@ def cmd_sync_files(args):
     return 0
 
 
+def closest_manifest_keys(key, known, n=3):
+    """Up to n manifest keys a mistyped --only key most likely meant.
+
+    Same-stem keys come first: the usual slip (BACKLOG #698) is passing the
+    CSV path, csv/Zoneserver/RF_Bin/script/Foo.csv, for an entry keyed by
+    Zoneserver/RF_Bin/script/Foo.dat -- too far apart for difflib alone.
+    """
+    stem = os.path.splitext(os.path.basename(key.replace("\\", "/")))[0]
+    same = sorted(k for k in known
+                  if os.path.splitext(os.path.basename(k))[0].lower()
+                  == stem.lower())
+    close = difflib.get_close_matches(key, sorted(known), n=n, cutoff=0.6)
+    return (same + [k for k in close if k not in same])[:n]
+
+
+def unknown_only_keys(roots, only):
+    """[(key, [closest keys])] for each --only key that is in no root's
+    manifest. refresh_manifest skips a key it doesn't hold, so without this
+    a typo'd key prints "Nothing to refresh" and exits 0 (BACKLOG #698)."""
+    known = set()
+    for _name, path in roots:
+        manifest = read_manifest(path)
+        for section in ("tables", "edf", "files"):
+            known.update(manifest.get(section, {}))
+    return [(key, closest_manifest_keys(key, known))
+            for key in only if key not in known]
+
+
 def cmd_refresh_manifest(args):
     roots = resolve_roots(args.repo, args.root)
+    if args.only:
+        unknown = unknown_only_keys(roots, args.only)
+        if unknown:
+            for key, near in unknown:
+                print("--only %s: not a manifest entry in %s" % (
+                    key, ", ".join(name or path for name, path in roots)),
+                    file=sys.stderr)
+                for k in near:
+                    print("  did you mean: %s" % k, file=sys.stderr)
+            print("Nothing refreshed. Keys are the install-relative "
+                  "forward-slash path (the .dat/.edf/file, not its CSV).",
+                  file=sys.stderr)
+            return 2
     any_stale = False
     for name, path in roots:
         if name:
