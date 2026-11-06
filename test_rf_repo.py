@@ -84,6 +84,19 @@ class BuildCreateTests(unittest.TestCase):
             with open(live, "rb") as f:
                 self.assertEqual(f.read(), b"hello")
 
+    def test_create_only_places_the_named_entry_and_no_other(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, server_root = _make_repo(
+                tmp, {"Map/a.txt": b"hello", "Map/b.txt": b"thin"})
+            pending, backup = build_to_server(
+                repo, server_root, apply=True,
+                create_only=["Map/a.txt", "Map/not-tracked.txt"])
+            self.assertEqual([s.rel for s in pending], ["Map/a.txt"])
+            self.assertTrue(
+                os.path.exists(os.path.join(server_root, "Map", "a.txt")))
+            self.assertFalse(
+                os.path.exists(os.path.join(server_root, "Map", "b.txt")))
+
     def test_allow_create_creates_missing_parent_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, server_root = _make_repo(

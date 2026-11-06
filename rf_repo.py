@@ -1516,7 +1516,8 @@ def field_changes(repo, rel, server_root, limit=500):
 # ------------------------------------------------------------------- build
 
 def build_to_server(repo, server_root=None, only=None, apply=False,
-                    allow_create=False, seed_state=False, progress=None):
+                    allow_create=False, seed_state=False, progress=None,
+                    create_only=None):
     """Write changed (and, with allow_create, missing) entries to the server.
 
     Returns (written, backup_dir). With apply=False nothing is written; the
@@ -1525,7 +1526,10 @@ def build_to_server(repo, server_root=None, only=None, apply=False,
 
     GONE entries -- present in the repo, absent from the install -- are
     never included unless allow_create is set: build must never silently
-    repopulate a live install that is deliberately thin (#79).
+    repopulate a live install that is deliberately thin (#79). create_only
+    (BACKLOG #941) names the GONE entries to place and leaves every other one
+    alone: a release deploy creates exactly the tables it lists. Names that
+    are not GONE entries are ignored, so a list may hold other files.
 
     manifest["state"] entries (BACKLOG #85: e.g. the 26 SystemSave/*_Boss.ini
     boss-respawn files; BACKLOG #164: the client's Launcher.ini/clientdb.dat)
@@ -1550,6 +1554,10 @@ def build_to_server(repo, server_root=None, only=None, apply=False,
     pending = [s for s in statuses if s.state == Status.CHANGED]
     if allow_create:
         pending += [s for s in statuses if s.state == Status.GONE]
+    elif create_only:
+        wanted_new = set(create_only)
+        pending += [s for s in statuses
+                    if s.state == Status.GONE and s.rel in wanted_new]
     if seed_state:
         for key in manifest.get("state", []):
             native = key.replace("/", os.sep)
@@ -1847,7 +1855,8 @@ def cmd_build(args):
                                           apply=args.confirm,
                                           allow_create=args.allow_create,
                                           seed_state=args.seed_state,
-                                          progress=_bar)
+                                          progress=_bar,
+                                          create_only=args.create_only)
         sys.stdout.write("\r" + " " * 78 + "\r")
         if not pending:
             print("Nothing to build -- the install already matches the repo.")
@@ -1918,6 +1927,11 @@ def main(argv=None):
     b = sub.add_parser("build", help="write changed tables to the install")
     b.add_argument("--confirm", action="store_true",
                    help="actually write (without it, only lists changes)")
+    b.add_argument("--create-only", action="append", metavar="REL",
+                   help="also create this one entry if the repo tracks it and "
+                   "the install lacks it; repeat for more. Every other "
+                   "missing entry stays missing. Names the repo does not "
+                   "track are ignored.")
     b.add_argument("--allow-create", action="store_true",
                    help="also create entries the repo tracks but the "
                    "install lacks. Opt-in and never implied by --confirm "
